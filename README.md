@@ -37,13 +37,7 @@ Ou direto: `node server.js` / `npm start`.
 
 Ao subir pela primeira vez o servidor imprime o **usuário e a senha** gerados:
 
-```
-  ================================================
-   LOGIN CRIADO (guarde este usuario e senha)
-   usuario: admin
-   senha:   3d2fda76
-  ================================================
-```
+
 
 Abra no navegador: **http://localhost:8090**
 
