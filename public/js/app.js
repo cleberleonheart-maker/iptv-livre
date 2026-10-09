@@ -1129,10 +1129,40 @@ $('#btnExport').onclick = exportFlow;
 
 /* ---------------- boot ---------------- */
 
+// Android TV: o botao Voltar fecha a camada aberta (player/dialogo/painel)
+// e so sai do app quando nao ha nada para fechar. Chamado pelo MainActivity.
+window.__onAndroidBack = function () {
+  if (!dlg.hidden) {
+    closeDlg(null);
+    return true;
+  }
+  if (Player.isOpen) {
+    Player.close();
+    return true;
+  }
+  if (!panel.hidden) {
+    panel.hidden = true;
+    return true;
+  }
+  const sb = $('#sidebar');
+  if (sb.classList.contains('open')) {
+    sb.classList.remove('open');
+    return true;
+  }
+  return false;
+};
+
 // PWA: registra o service worker (shell offline) o quanto antes
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+  // quando uma versao nova assume o controle, recarrega uma unica vez
+  let swRefreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (swRefreshing) return;
+    swRefreshing = true;
+    location.reload();
   });
 }
 

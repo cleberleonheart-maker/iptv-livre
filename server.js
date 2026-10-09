@@ -201,6 +201,57 @@ const auth = createAuth(CACHE_DIR, {
 });
 
 /* ------------------------------------------------------------------ *
+ * Token de sessao para o Chromecast
+ * ------------------------------------------------------------------
+ * O receiver do Chromecast busca o stream por conta propria e nao tem o
+ * cookie de sessao; entao emitimos um token HMAC curto que ele usa em
+ * /proxy?token=... (e que o proxy propaga para os segmentos). */
+
+const CAST_TTL = 6 * 3600e3;
+let _secret = null;
+function serverSecret() {
+  if (_secret) return _secret;
+  const file = path.join(CACHE_DIR, 'secret.key');
+  try {
+    _secret = fs.readFileSync(file, 'utf8').trim();
+  } catch {}
+  if (!_secret) {
+    _secret = crypto.randomBytes(32).toString('hex');
+    try {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+      fs.writeFileSync(file, _secret, { mode: 0o600 });
+    } catch {}
+  }
+  return _secret;
+}
+function hmac(data) {
+  return crypto.createHmac('sha256', serverSecret()).update(data).digest('base64url');
+}
+function makeCastToken(user) {
+  const payload = `${Date.now() + CAST_TTL}.${user}`;
+  return Buffer.from(payload, 'utf8').toString('base64url') + '.' + hmac(payload);
+}
+function verifyCastToken(token) {
+  if (!token) return null;
+  const [b64, sig] = String(token).split('.');
+  if (!b64 || !sig) return null;
+  let payload;
+  try {
+    payload = Buffer.from(b64, 'base64url').toString('utf8');
+  } catch {
+    return null;
+  }
+  const expected = hmac(payload);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  const dot = payload.indexOf('.');
+  const exp = Number(payload.slice(0, dot));
+  if (!exp || exp < Date.now()) return null;
+  return payload.slice(dot + 1) || null; // usuario
+}
+
+/* ------------------------------------------------------------------ *
  * HTTP fetch helper with on-disk cache
  * ------------------------------------------------------------------ */
 
@@ -1150,7 +1201,7 @@ async function fetchUpstream(url, headers, hops = 0) {
   });
 }
 
-async function proxyStream(req, res, target) {
+async function proxyStream(req, res, target, castToken = '') {
   let u;
   try {
     u = new URL(target);
@@ -1251,7 +1302,7 @@ async function proxyStream(req, res, target) {
   } catch {}
 
   // reescreve segmentos, variantes e URIs de tags para passarem pelo proxy
-  send(res, 200, rewritePlaylist(buf.toString('utf8'), target), {
+  send(res, 200, rewritePlaylist(buf.toString('utf8'), target, castToken), {
     'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
     'Cache-Control': 'no-store',
   });
@@ -1262,18 +1313,19 @@ async function proxyStream(req, res, target) {
    - URIs dentro de tags: #EXT-X-KEY (AES-128), #EXT-X-MAP (fMP4),
      #EXT-X-MEDIA (audios/legendas alternativas), #EXT-X-I-FRAME-STREAM-INF,
      #EXT-X-PRELOAD-HINT e #EXT-X-SESSION-KEY */
-function proxify(base, raw) {
+function proxify(base, raw, token = '') {
   if (String(raw).startsWith('/proxy?u=')) return raw;
   try {
     const abs = new URL(raw, base).toString();
     if (!/^https?:/.test(abs)) return raw;
-    return '/proxy?u=' + encodeURIComponent(abs);
+    const t = token ? '&token=' + encodeURIComponent(token) : '';
+    return '/proxy?u=' + encodeURIComponent(abs) + t;
   } catch {
     return raw;
   }
 }
 
-function rewritePlaylist(text, target) {
+function rewritePlaylist(text, target, token = '') {
   return text
     .split(/\r?\n/)
     .map((line) => {
@@ -1282,10 +1334,10 @@ function rewritePlaylist(text, target) {
       if (line.startsWith('#')) {
         if (!/URI\s*=\s*"/i.test(line)) return line;
         return line.replace(/URI\s*=\s*"([^"]*)"/gi, (_m, uri) => {
-          return `URI="${proxify(target, uri)}"`;
+          return `URI="${proxify(target, uri, token)}"`;
         });
       }
-      return proxify(target, trimmed);
+      return proxify(target, trimmed, token);
     })
     .join('\n');
 }
@@ -1356,8 +1408,9 @@ async function handleRequest(req, res) {
       : sendJSON(res, 401, { ok: false });
   }
 
-  // tudo abaixo exige sessao valida
-  if (!auth.currentUser(req)) {
+  // tudo abaixo exige sessao valida (ou token de cast, so no /proxy)
+  const castUser = p === '/proxy' ? verifyCastToken(url.searchParams.get('token')) : null;
+  if (!auth.currentUser(req) && !castUser) {
     if (p.startsWith('/api') || p === '/proxy' || p === '/sub' || p === '/logo')
       return sendJSON(res, 401, { error: 'nao autenticado' });
   }
@@ -1530,6 +1583,11 @@ async function handleRequest(req, res) {
     if (p === '/api/logout-all' && req.method === 'POST') {
       auth.logoutAll(auth.currentUser(req), res);
       return sendJSON(res, 200, { ok: true });
+    }
+
+    if (p === '/api/cast-token' && req.method === 'GET') {
+      const me = auth.currentUser(req);
+      return sendJSON(res, 200, { token: makeCastToken(me), ttl: CAST_TTL / 1000 });
     }
 
     if (p === '/api/parental' && req.method === 'GET') {
@@ -1844,7 +1902,7 @@ async function handleRequest(req, res) {
     if (p === '/proxy') {
       const target = url.searchParams.get('u');
       if (!target) return send(res, 400, 'informe ?u=');
-      return proxyStream(req, res, target);
+      return proxyStream(req, res, target, castUser ? url.searchParams.get('token') : '');
     }
 
     if (p === '/health')
@@ -1997,4 +2055,14 @@ function start() {
 
 if (isMain) start();
 
-export { buildCatalog, parseM3U, parseXMLTV, rewritePlaylist, srtToVtt, start, server };
+export {
+  buildCatalog,
+  parseM3U,
+  parseXMLTV,
+  rewritePlaylist,
+  srtToVtt,
+  makeCastToken,
+  verifyCastToken,
+  start,
+  server,
+};

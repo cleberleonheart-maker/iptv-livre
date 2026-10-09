@@ -1,4 +1,4 @@
-const CACHE = 'iptvlivre-v7';
+const CACHE = 'iptvlivre-v8';
 const CORE = [
   '/',
   '/index.html',
@@ -31,6 +31,10 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+/* A pagina pede os arquivos com ?v=... (cache-busting), mas o precache e
+   feito sem query. ignoreSearch faz os dois casarem. */
+const MATCH = { ignoreSearch: true };
+
 async function networkFirst(req) {
   const cache = await caches.open(CACHE);
   try {
@@ -38,21 +42,23 @@ async function networkFirst(req) {
     if (res && res.ok) cache.put(req, res.clone());
     return res;
   } catch (err) {
-    const hit = await cache.match(req);
+    const hit = await cache.match(req, MATCH);
     if (hit) return hit;
     throw err;
   }
 }
 
-async function staleWhileRevalidate(req) {
+async function staleWhileRevalidate(event, req) {
   const cache = await caches.open(CACHE);
-  const hit = await cache.match(req);
+  const hit = await cache.match(req, MATCH);
   const net = fetch(req)
     .then((res) => {
       if (res && res.ok) cache.put(req, res.clone());
       return res;
     })
     .catch(() => null);
+  // mantem o worker vivo ate o revalidate terminar (mesmo com hit no cache)
+  event.waitUntil(net.catch(() => {}));
   return hit || (await net) || Response.error();
 }
 
@@ -72,7 +78,7 @@ self.addEventListener('fetch', (e) => {
 
   // estaticos do proprio site: mostra rapido e atualiza em segundo plano
   if (url.origin === self.location.origin) {
-    e.respondWith(staleWhileRevalidate(req));
+    e.respondWith(staleWhileRevalidate(e, req));
     return;
   }
 

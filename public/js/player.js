@@ -356,7 +356,16 @@ const Player = (() => {
     if (!castReady) initCast();
     const src = queue[idx] ? queue[idx].url : null;
     if (!src) return;
-    const url = new URL('/proxy?u=' + encodeURIComponent(src), location.origin).toString();
+    // o receiver nao tem o cookie de sessao: usa um token curto emitido pelo servidor
+    let castToken = '';
+    try {
+      const r = await fetch('/api/cast-token');
+      if (r.ok) castToken = (await r.json()).token || '';
+    } catch {}
+    const url = new URL(
+      '/proxy?u=' + encodeURIComponent(src) + (castToken ? '&token=' + encodeURIComponent(castToken) : ''),
+      location.origin
+    ).toString();
     try {
       const ctx = cast.framework.CastContext.getInstance();
       const session = ctx.getCurrentSession() || (await ctx.requestSession());

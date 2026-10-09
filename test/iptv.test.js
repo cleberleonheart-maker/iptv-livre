@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseM3U, parseXMLTV, rewritePlaylist, srtToVtt } from '../server.js';
+import {
+  parseM3U,
+  parseXMLTV,
+  rewritePlaylist,
+  srtToVtt,
+  makeCastToken,
+  verifyCastToken,
+} from '../server.js';
 
 test('parseM3U: extrai nome, logo, grupo e url', () => {
   const m3u = `#EXTM3U
@@ -75,6 +82,24 @@ test('rewritePlaylist: nao mexe em tags sem URI nem em URLs ja proxied', () => {
   const pl = '#EXT-X-TARGETDURATION:6\n#EXTINF:4,\n/proxy?u=seg.ts\n';
   const out = rewritePlaylist(pl, 'http://orig.example/live.m3u8');
   assert.equal(out, pl);
+});
+
+test('rewritePlaylist: propaga o token de cast nos segmentos', () => {
+  const pl = '#EXTM3U\n#EXTINF:4,\nseg.ts\n';
+  const out = rewritePlaylist(pl, 'http://orig.example/live.m3u8', 'TOK123');
+  assert.ok(out.includes('/proxy?u=') && out.includes('&token=TOK123'));
+});
+
+test('cast token: ida e volta devolve o usuario', () => {
+  const t = makeCastToken('ana');
+  assert.equal(verifyCastToken(t), 'ana');
+});
+
+test('cast token: assinatura adulterada e rejeitada', () => {
+  const t = makeCastToken('ana');
+  assert.equal(verifyCastToken(t.slice(0, -2) + 'xy'), null);
+  assert.equal(verifyCastToken('lixo'), null);
+  assert.equal(verifyCastToken(''), null);
 });
 
 test('srtToVtt: converte timestamps e adiciona cabecalho WEBVTT', () => {

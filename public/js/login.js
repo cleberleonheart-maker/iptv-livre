@@ -9,7 +9,7 @@ const Login = (() => {
   const btn = document.getElementById('btnLogin');
   const msg = document.getElementById('loginMsg');
   const buildEl = document.getElementById('buildTag');
-  const BUILD = '2026.10.09-4';
+  const BUILD = '2026.10.09-5';
   if (buildEl) buildEl.textContent = 'build ' + BUILD;
 
   function hide() {

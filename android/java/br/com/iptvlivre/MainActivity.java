@@ -287,16 +287,24 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (web != null && web.canGoBack()) {
-            web.goBack();
+        if (web == null) {
+            super.onBackPressed();
             return;
         }
-        // volta para a tela de troca de servidor
-        if (web != null) {
-            web.destroy();
-            web = null;
-        }
-        showSetup(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_URL, null));
+        // deixa a pagina decidir: fecha player/dialogo/painel antes de sair
+        web.evaluateJavascript(
+                "(window.__onAndroidBack && window.__onAndroidBack()) ? 'handled' : 'exit'",
+                new android.webkit.ValueCallback<String>() {
+                    @Override public void onReceiveValue(String value) {
+                        if (value != null && value.contains("handled")) return;
+                        // nada aberto no app: volta para a tela de troca de servidor
+                        if (web != null) {
+                            web.destroy();
+                            web = null;
+                        }
+                        showSetup(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_URL, null));
+                    }
+                });
     }
 
     @Override
