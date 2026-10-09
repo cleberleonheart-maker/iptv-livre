@@ -7,6 +7,7 @@ import path from 'node:path';
 
 const SESSION_TTL = 30 * 24 * 3600e3; // 30 dias
 const COOKIE = 'iptv_sid';
+let secureCookies = false; // marcado como true quando servido por HTTPS
 
 export function createAuth(cacheDir, { onFirstRun } = {}) {
   const file = path.join(cacheDir, 'users.json');
@@ -145,13 +146,24 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
     const out = {};
     for (const part of header.split(';')) {
       const i = part.indexOf('=');
-      if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+      if (i > 0) {
+        const key = part.slice(0, i).trim();
+        let val = part.slice(i + 1).trim();
+        try {
+          val = decodeURIComponent(val);
+        } catch {
+          // cookie malformado (ex.: '%' solto): usa o valor cru em vez de derrubar
+        }
+        out[key] = val;
+      }
     }
     return out;
   }
 
   function setCookieHeader(sid) {
-    return `${COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}`;
+    return `${COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Lax${
+      secureCookies ? '; Secure' : ''
+    }; Max-Age=${SESSION_TTL / 1000}`;
   }
 
   function clearCookieHeader() {
@@ -178,6 +190,7 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
       const before = db.users.length;
       db.users = db.users.filter((u) => u.user !== user);
       save();
+      if (before !== db.users.length) dropUserSessions(user);
       return before !== db.users.length;
     },
 
@@ -187,6 +200,8 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
       if (!rec) return false;
       Object.assign(rec, hash(next));
       save();
+      // derruba todas as sessoes; quem trocou a senha ganha uma nova (issue)
+      dropUserSessions(user);
       return true;
     },
 
@@ -195,6 +210,17 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
       const sid = createSession(user);
       res.setHeader('Set-Cookie', setCookieHeader(sid));
       return true;
+    },
+
+    /* Cria uma sessao nova para um usuario ja autenticado (ex.: apos trocar a
+       senha, sem exigir login de novo no mesmo aparelho). */
+    issue(res, user) {
+      const sid = createSession(user);
+      res.setHeader('Set-Cookie', setCookieHeader(sid));
+    },
+
+    setSecure(v) {
+      secureCookies = !!v;
     },
 
     currentUser(req) {

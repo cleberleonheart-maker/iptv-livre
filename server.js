@@ -204,9 +204,15 @@ const auth = createAuth(CACHE_DIR, {
  * HTTP fetch helper with on-disk cache
  * ------------------------------------------------------------------ */
 
+const MAX_FETCH_BYTES = 32 * 1024 * 1024; // teto de download por fetch
+const MAX_DECOMPRESS = 64 * 1024 * 1024; // teto ao descomprimir (anti zip-bomb)
+
+/* Opcoes de zlib que recusam saida gigante (bomba de descompressao). */
+const INFLATE_OPTS = { maxOutputLength: MAX_DECOMPRESS };
+
 async function fetchBuf(
   url,
-  { ttl = 6 * 3600e3, referer, headers = {}, timeout = 90000 } = {}
+  { ttl = 6 * 3600e3, referer, headers = {}, timeout = 90000, guard = false } = {}
 ) {
   const key = path.join(
     CACHE_DIR,
@@ -222,7 +228,10 @@ async function fetchBuf(
     }
   } catch {}
 
-  const res = await rawFetch(url, { referer, headers, timeout });
+  // valida so no cache-miss (evita DNS lookup a cada logo ja em cache)
+  if (guard) await assertPublicUrl(url);
+
+  const res = await rawFetch(url, { referer, headers, timeout, guard });
   await fsp.writeFile(key, res.body).catch(() => {});
   await fsp
     .writeFile(metaFile, JSON.stringify({ at: Date.now(), url }))
@@ -230,7 +239,10 @@ async function fetchBuf(
   return { buf: res.body, cached: false, at: Date.now() };
 }
 
-function rawFetch(url, { referer, headers = {}, timeout = 15000 } = {}) {
+function rawFetch(
+  url,
+  { referer, headers = {}, timeout = 15000, guard = false, hops = 0 } = {}
+) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const mod = u.protocol === 'http:' ? http : https;
@@ -250,8 +262,23 @@ function rawFetch(url, { referer, headers = {}, timeout = 15000 } = {}) {
       (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
+          if (hops >= 5) {
+            reject(new Error(`redirects demais em ${url}`));
+            return;
+          }
           const next = new URL(res.headers.location, url).toString();
-          rawFetch(next, { referer, headers, timeout }).then(resolve, reject);
+          const follow = () =>
+            rawFetch(next, { referer, headers, timeout, guard, hops: hops + 1 }).then(
+              resolve,
+              reject
+            );
+          if (guard) {
+            assertPublicUrl(next).then(follow, (e) =>
+              reject(new Error(`redirect bloqueado: ${e.message}`))
+            );
+          } else {
+            follow();
+          }
           return;
         }
         if (res.statusCode !== 200) {
@@ -260,7 +287,15 @@ function rawFetch(url, { referer, headers = {}, timeout = 15000 } = {}) {
           return;
         }
         const chunks = [];
-        res.on('data', (c) => chunks.push(c));
+        let len = 0;
+        res.on('data', (c) => {
+          len += c.length;
+          if (len > MAX_FETCH_BYTES) {
+            req.destroy(new Error(`resposta grande demais em ${url}`));
+            return;
+          }
+          chunks.push(c);
+        });
         res.on('end', () => resolve({ body: Buffer.concat(chunks) }));
       }
     );
@@ -576,10 +611,10 @@ function parseM3U(text) {
 }
 
 async function importCustom(url) {
-  const res = await fetchBuf(url, { ttl: 30 * 60e3 });
+  const res = await fetchBuf(url, { ttl: 30 * 60e3, guard: true });
   let text = res.buf.toString('utf8');
   if (text.charCodeAt(0) === 0x1f && text.charCodeAt(1) === 0x8b) {
-    text = zlib.gunzipSync(res.buf).toString('utf8');
+    text = zlib.gunzipSync(res.buf, INFLATE_OPTS).toString('utf8');
   }
   const parsed = parseM3U(text);
   const file = path.join(CACHE_DIR, 'custom.json');
@@ -948,6 +983,9 @@ function send(res, status, body, headers = {}) {
   }
   headers = {
     'Access-Control-Allow-Origin': '*',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'X-Frame-Options': 'SAMEORIGIN',
     ...headers,
   };
   res.writeHead(status, headers);
@@ -1207,9 +1245,9 @@ async function proxyStream(req, res, target) {
   try {
     const enc = String(upstreamRes.headers['content-encoding'] || '')
       .toLowerCase().split(',')[0].trim();
-    if (enc === 'gzip' || enc === 'x-gzip') buf = zlib.gunzipSync(buf);
-    else if (enc === 'br') buf = zlib.brotliDecompressSync(buf);
-    else if (enc === 'deflate') buf = zlib.inflateSync(buf);
+    if (enc === 'gzip' || enc === 'x-gzip') buf = zlib.gunzipSync(buf, INFLATE_OPTS);
+    else if (enc === 'br') buf = zlib.brotliDecompressSync(buf, INFLATE_OPTS);
+    else if (enc === 'deflate') buf = zlib.inflateSync(buf, INFLATE_OPTS);
   } catch {}
 
   // reescreve segmentos, variantes e URIs de tags para passarem pelo proxy
@@ -1265,7 +1303,7 @@ function srtToVtt(text) {
  * Rotas
  * ------------------------------------------------------------------ */
 
-async function handle(req, res) {
+async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const p = url.pathname;
 
@@ -1320,7 +1358,7 @@ async function handle(req, res) {
 
   // tudo abaixo exige sessao valida
   if (!auth.currentUser(req)) {
-    if (p.startsWith('/api') || p === '/proxy' || p === '/sub')
+    if (p.startsWith('/api') || p === '/proxy' || p === '/sub' || p === '/logo')
       return sendJSON(res, 401, { error: 'nao autenticado' });
   }
 
@@ -1592,6 +1630,7 @@ async function handle(req, res) {
       if (String(next || '').length < 6)
         return sendJSON(res, 400, { error: 'nova senha deve ter pelo menos 6 caracteres' });
       auth.changePassword(me, String(next));
+      auth.issue(res, me);
       return sendJSON(res, 200, { ok: true });
     }
 
@@ -1669,9 +1708,9 @@ async function handle(req, res) {
     if (p === '/api/epg') {
       const src = url.searchParams.get('src');
       if (!src) return sendJSON(res, 400, { error: 'informe ?src=<url do guide.xml>' });
-      const r = await fetchBuf(src, { ttl: 3 * 3600e3 });
+      const r = await fetchBuf(src, { ttl: 3 * 3600e3, guard: true });
       let buf = r.buf;
-      if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf);
+      if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf, INFLATE_OPTS);
       epgCache = parseXMLTV(buf.toString('utf8'));
       epgCache.index = buildEpgIndex(epgCache);
       epgCache.src = src;
@@ -1821,9 +1860,9 @@ async function handle(req, res) {
 
     if (p === '/api/epg/load') {
       const src = url.searchParams.get('src') || 'https://epg.pw/xmltv/epg_BR.xml.gz';
-      const r = await fetchBuf(src, { ttl: 3 * 3600e3 });
+      const r = await fetchBuf(src, { ttl: 3 * 3600e3, guard: true });
       let buf = r.buf;
-      if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf);
+      if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf, INFLATE_OPTS);
       epgCache = parseXMLTV(buf.toString('utf8'));
       epgCache.index = buildEpgIndex(epgCache);
       epgCache.src = src;
@@ -1845,10 +1884,14 @@ async function handle(req, res) {
       const target = url.searchParams.get('u');
       if (!target || !/^https?:/.test(target)) return send(res, 404, '');
       try {
-        const r = await fetchBuf(target, { ttl: 30 * 24 * 3600e3, timeout: 15000 });
+        const r = await fetchBuf(target, { ttl: 30 * 24 * 3600e3, timeout: 15000, guard: true });
         const ext = path.extname(new URL(target).pathname).toLowerCase();
+        const ct = sniffImage(r.buf, ext);
+        // SVG pode embutir script e rodar na origem do app: nunca serve.
+        if (ct === 'image/svg+xml') return send(res, 404, 'formato nao suportado');
         return send(res, 200, r.buf, {
-          'Content-Type': sniffImage(r.buf, ext),
+          'Content-Type': ct,
+          'X-Content-Type-Options': 'nosniff',
           'Cache-Control': 'public, max-age=86400',
         });
       } catch {
@@ -1865,9 +1908,9 @@ async function handle(req, res) {
         return send(res, 400, `url bloqueada: ${e.message}`);
       }
       try {
-        const r = await fetchBuf(target, { ttl: 6 * 3600e3, timeout: 15000 });
+        const r = await fetchBuf(target, { ttl: 6 * 3600e3, timeout: 15000, guard: true });
         let buf = r.buf;
-        if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf);
+        if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf, INFLATE_OPTS);
         const text = srtToVtt(buf.toString('utf8'));
         return send(res, 200, text, {
           'Content-Type': 'text/vtt; charset=utf-8',
@@ -1881,8 +1924,24 @@ async function handle(req, res) {
     return serveStatic(req, res, p);
   } catch (err) {
     console.error('[erro]', p, err.message);
-    return sendJSON(res, 500, { error: err.message });
+    return sendJSON(res, 500, { error: 'erro interno' });
   }
+}
+
+/* Envolve o handler para que QUALQUER rejeicao (URL invalida, cookie
+   malformado, corpo grande, etc.) vire uma resposta - nunca derrube o
+   processo. O handler interno ja trata os erros das rotas. */
+function handle(req, res) {
+  handleRequest(req, res).catch((err) => {
+    console.error('[erro nao tratado]', req.method, req.url, err?.message || err);
+    try {
+      if (!res.headersSent) {
+        send(res, 500, 'erro interno', { 'Content-Type': 'text/plain; charset=utf-8' });
+      } else {
+        res.destroy();
+      }
+    } catch {}
+  });
 }
 
 /* TLS opcional: se TLS=1 (ou TLS!=0 e existirem os arquivos), sobe HTTPS
@@ -1910,6 +1969,21 @@ function resolveTls() {
 const tls = resolveTls();
 const server = tls ? https.createServer(tls, handle) : http.createServer(handle);
 const SCHEME = tls ? 'https' : 'http';
+auth.setSecure(SCHEME === 'https');
+
+/* Requisicao malformada no nivel HTTP: responde 400 e segue vivo. */
+server.on('clientError', (err, socket) => {
+  if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+});
+
+/* Rede de seguranca: nada de derrubar o processo por um erro solto. */
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err?.stack || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack || err);
+  process.exit(1);
+});
 
 const isMain =
   process.argv[1] &&
@@ -1923,4 +1997,4 @@ function start() {
 
 if (isMain) start();
 
-export { buildCatalog, parseM3U, parseXMLTV, rewritePlaylist, srtToVtt, start };
+export { buildCatalog, parseM3U, parseXMLTV, rewritePlaylist, srtToVtt, start, server };

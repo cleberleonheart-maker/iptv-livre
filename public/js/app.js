@@ -253,9 +253,7 @@ function cardFor(ch) {
       : (ch.logo || '');
 
   const logo = logoUrl
-    ? `<img class="logo" loading="lazy" referrerpolicy="no-referrer"
-         src="${escapeHTML(logoUrl)}" alt=""
-         onerror="this.outerHTML='<div class=\\'logo ph\\'>${ch.kind === 'radio' ? '🎙' : '📺'}</div>'">`
+    ? `<img class="logo" loading="lazy" referrerpolicy="no-referrer" src="${escapeHTML(logoUrl)}" alt="">`
     : `<div class="logo ph">${ch.kind === 'radio' ? '🎙' : '📺'}</div>`;
 
   const qual =
@@ -296,7 +294,18 @@ function cardFor(ch) {
     e.stopPropagation();
     toggleFav(ch.id);
   };
+  const img = el.querySelector('img.logo');
+  if (img) {
+    img.addEventListener(
+      'error',
+      () => {
+        img.outerHTML = `<div class="logo ph">${ch.kind === 'radio' ? '🎙' : '📺'}</div>`;
+      },
+      { once: true }
+    );
+  }
   el.onkeydown = (e) => {
+    if (e.target.closest('.fav')) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       play(ch, el);
