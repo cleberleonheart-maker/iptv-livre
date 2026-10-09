@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
+
+const scrypt = promisify(crypto.scrypt);
 
 /* Autenticacao local: usuario/senha com hash scrypt e sessao em cookie.
    Nao ha back-end externo: tudo fica no arquivo .cache/users.json. */
@@ -64,14 +67,25 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
     return { salt, hash: derived };
   }
 
+  // versao assincrona: nao trava o event loop (scrypt e propositalmente pesado)
+  async function hashAsync(password, salt = crypto.randomBytes(16).toString('hex')) {
+    const derived = await scrypt(password, salt, 64);
+    return { salt, hash: derived.toString('hex') };
+  }
+
   const sessions = new Map();
 
-  function verify(user, password) {
+  async function verify(user, password) {
     reloadIfChanged();
     const rec = db.users.find((u) => u.user === user);
-    if (!rec) return false;
-    const { hash: h } = hash(password, rec.salt);
-    const a = Buffer.from(h, 'hex');
+    if (!rec) {
+      // gasta um scrypt mesmo assim, para o tempo de resposta nao denunciar
+      // se o usuario existe ou nao
+      await scrypt(password, 'inexistente', 64).catch(() => {});
+      return false;
+    }
+    const derived = await scrypt(password, rec.salt, 64);
+    const a = derived;
     const b = Buffer.from(rec.hash, 'hex');
     return a.length === b.length && crypto.timingSafeEqual(a, b);
   }
@@ -177,10 +191,10 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
     users: () => db.users.map((u) => ({ user: u.user })),
 
     verify,
-    addUser(user, password) {
+    async addUser(user, password) {
       reloadIfChanged();
       if (db.users.some((u) => u.user === user)) return { ok: false, error: 'usuario ja existe' };
-      db.users.push({ user, ...hash(password) });
+      db.users.push({ user, ...(await hashAsync(password)) });
       save();
       return { ok: true };
     },
@@ -194,19 +208,19 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
       return before !== db.users.length;
     },
 
-    changePassword(user, next) {
+    async changePassword(user, next) {
       reloadIfChanged();
       const rec = db.users.find((u) => u.user === user);
       if (!rec) return false;
-      Object.assign(rec, hash(next));
+      Object.assign(rec, await hashAsync(next));
       save();
       // derruba todas as sessoes; quem trocou a senha ganha uma nova (issue)
       dropUserSessions(user);
       return true;
     },
 
-    attempt(res, user, password) {
-      if (!verify(user, password)) return false;
+    async attempt(res, user, password) {
+      if (!(await verify(user, password))) return false;
       const sid = createSession(user);
       res.setHeader('Set-Cookie', setCookieHeader(sid));
       return true;

@@ -27,33 +27,48 @@ function mkReq(sid) {
   return { headers: { cookie: sid ? `iptv_sid=${sid}` : '' } };
 }
 
-test('changePassword derruba as sessoes antigas', () => {
+test('changePassword derruba as sessoes antigas', async () => {
   const { auth, dir, created } = mkAuth();
   try {
     const { user, pass } = created;
     const res = mkRes();
-    assert.ok(auth.attempt(res, user, pass));
+    assert.ok(await auth.attempt(res, user, pass));
     const sid = sidFrom(res);
     assert.equal(auth.currentUser(mkReq(sid)), user);
 
-    assert.ok(auth.changePassword(user, 'novaSenha123'));
+    assert.ok(await auth.changePassword(user, 'novaSenha123'));
     assert.equal(auth.currentUser(mkReq(sid)), null);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('removeUser derruba as sessoes do usuario removido', () => {
+test('removeUser derruba as sessoes do usuario removido', async () => {
   const { auth, dir } = mkAuth();
   try {
-    auth.addUser('bob', 'senha123');
+    await auth.addUser('bob', 'senha123');
     const res = mkRes();
-    assert.ok(auth.attempt(res, 'bob', 'senha123'));
+    assert.ok(await auth.attempt(res, 'bob', 'senha123'));
     const sid = sidFrom(res);
     assert.equal(auth.currentUser(mkReq(sid)), 'bob');
 
     assert.ok(auth.removeUser('bob'));
     assert.equal(auth.currentUser(mkReq(sid)), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('verify (assincrono) aceita a senha certa e rejeita o resto', async () => {
+  const { auth, dir, created } = mkAuth();
+  try {
+    assert.equal(await auth.verify(created.user, created.pass), true);
+    assert.equal(await auth.verify(created.user, 'errada'), false);
+    assert.equal(await auth.verify('fantasma', 'qualquer'), false);
+    // apos trocar a senha, a antiga nao vale mais
+    await auth.changePassword(created.user, 'maisNova456');
+    assert.equal(await auth.verify(created.user, created.pass), false);
+    assert.equal(await auth.verify(created.user, 'maisNova456'), true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

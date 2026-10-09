@@ -8,6 +8,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import dns from 'node:dns/promises';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
 import { load as loadHealth, getHealth, recheck as recheckHealth, HEALTH_FILE } from './health.js';
@@ -19,6 +20,8 @@ const PORT = Number(process.env.PORT || 8090);
 const HOST = process.env.HOST || '0.0.0.0';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+const scrypt = promisify(crypto.scrypt);
 
 const IPTV = 'https://iptv-org.github.io';
 const SOURCES = {
@@ -457,10 +460,10 @@ function writeParental(user, cfg) {
 function hashPin(pin, salt = crypto.randomBytes(16).toString('hex')) {
   return { salt, hash: crypto.scryptSync(String(pin), salt, 64).toString('hex') };
 }
-function verifyPin(cfg, pin) {
-  if (!cfg) return false;
-  const { hash } = hashPin(pin, cfg.salt);
-  const a = Buffer.from(hash, 'hex');
+async function verifyPin(cfg, pin) {
+  if (!cfg || !cfg.hash || !cfg.salt) return false;
+  const derived = await scrypt(String(pin), cfg.salt, 64);
+  const a = Buffer.from(derived);
   const b = Buffer.from(cfg.hash, 'hex');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
@@ -1017,6 +1020,26 @@ function noteLoginOk(ip) {
   loginFails.delete(ip);
 }
 
+/* Rate-limit do PIN parental por usuario: apos 5 erros, espera 1s dobrando
+   a cada nova falha (teto de 5min). O scrypt sozinho nao impede forca-bruta. */
+const pinFails = new Map();
+function pinGuard(user) {
+  const rec = pinFails.get(user);
+  if (rec && rec.until > Date.now())
+    return { blocked: true, retryAfter: Math.ceil((rec.until - Date.now()) / 1000) };
+  return { blocked: false };
+}
+function notePinFail(user) {
+  const rec = pinFails.get(user) || { count: 0 };
+  rec.count++;
+  if (rec.count >= 5)
+    rec.until = Date.now() + Math.min(1000 * 2 ** (rec.count - 5), 5 * 60e3);
+  pinFails.set(user, rec);
+}
+function notePinOk(user) {
+  pinFails.delete(user);
+}
+
 function send(res, status, body, headers = {}) {
   const req = res.req;
   let buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
@@ -1387,7 +1410,7 @@ async function handleRequest(req, res) {
     } catch {
       return sendJSON(res, 400, { error: 'json invalido' });
     }
-    if (!auth.attempt(res, String(user || ''), String(pass || ''))) {
+    if (!(await auth.attempt(res, String(user || ''), String(pass || '')))) {
       await sleep(400);
       noteLoginFail(ip);
       return sendJSON(res, 401, { error: 'usuario ou senha invalidos' });
@@ -1601,6 +1624,11 @@ async function handleRequest(req, res) {
 
     if (p === '/api/parental' && req.method === 'POST') {
       const me = auth.currentUser(req);
+      const guard = pinGuard(me);
+      if (guard.blocked)
+        return sendJSON(res, 429, {
+          error: `muitas tentativas. Tente de novo em ${guard.retryAfter}s`,
+        });
       const body = await readBody(req);
       let data = {};
       try {
@@ -1608,8 +1636,10 @@ async function handleRequest(req, res) {
       } catch {}
       const cfg = readParental(me);
       if (data.action === 'set') {
-        if (cfg && !verifyPin(cfg, data.current || ''))
+        if (cfg && !(await verifyPin(cfg, data.current || ''))) {
+          notePinFail(me);
           return sendJSON(res, 401, { error: 'PIN atual incorreto' });
+        }
         if (String(data.pin || '').length < 4)
           return sendJSON(res, 400, { error: 'o PIN precisa de ao menos 4 dígitos' });
         const blocked = Array.isArray(data.blocked)
@@ -1623,12 +1653,16 @@ async function handleRequest(req, res) {
           : [];
         writeParental(me, { ...hashPin(String(data.pin)), blocked });
         parentalUnlock.set(me, Date.now() + PARENTAL_UNLOCK_MS);
+        notePinOk(me);
         return sendJSON(res, 200, { ok: true, ...parentalState(me) });
       }
       if (data.action === 'unlock') {
-        if (!cfg || !verifyPin(cfg, data.pin || ''))
+        if (!cfg || !(await verifyPin(cfg, data.pin || ''))) {
+          notePinFail(me);
           return sendJSON(res, 401, { error: 'PIN incorreto' });
+        }
         parentalUnlock.set(me, Date.now() + PARENTAL_UNLOCK_MS);
+        notePinOk(me);
         return sendJSON(res, 200, { ok: true, ...parentalState(me) });
       }
       if (data.action === 'lock') {
@@ -1636,10 +1670,13 @@ async function handleRequest(req, res) {
         return sendJSON(res, 200, { ok: true, ...parentalState(me) });
       }
       if (data.action === 'disable') {
-        if (cfg && !verifyPin(cfg, data.pin || ''))
+        if (cfg && !(await verifyPin(cfg, data.pin || ''))) {
+          notePinFail(me);
           return sendJSON(res, 401, { error: 'PIN incorreto' });
+        }
         writeParental(me, null);
         parentalUnlock.delete(me);
+        notePinOk(me);
         return sendJSON(res, 200, { ok: true, ...parentalState(me) });
       }
       return sendJSON(res, 400, { error: 'acao invalida' });
@@ -1659,7 +1696,7 @@ async function handleRequest(req, res) {
         return sendJSON(res, 400, { error: 'informe user e pass' });
       if (String(pass).length < 6)
         return sendJSON(res, 400, { error: 'senha deve ter pelo menos 6 caracteres' });
-      const out = auth.addUser(String(user).trim(), String(pass));
+      const out = await auth.addUser(String(user).trim(), String(pass));
       return out.ok
         ? sendJSON(res, 200, out)
         : sendJSON(res, 400, out);
@@ -1683,11 +1720,11 @@ async function handleRequest(req, res) {
       try {
         ({ old, next } = JSON.parse(body || '{}'));
       } catch {}
-      if (!auth.verify(me, String(old || '')))
+      if (!(await auth.verify(me, String(old || ''))))
         return sendJSON(res, 401, { error: 'senha atual incorreta' });
       if (String(next || '').length < 6)
         return sendJSON(res, 400, { error: 'nova senha deve ter pelo menos 6 caracteres' });
-      auth.changePassword(me, String(next));
+      await auth.changePassword(me, String(next));
       auth.issue(res, me);
       return sendJSON(res, 200, { ok: true });
     }

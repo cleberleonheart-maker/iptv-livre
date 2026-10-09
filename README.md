@@ -129,6 +129,7 @@ sudo systemctl enable --now iptv-livre
 ## APK (Android TV / Fire TV / TV Box)
 
 ```bash
+export IPTV_KS_PASS='sua-senha-da-keystore'   # tambem aceita IPTV_KEY_PASS
 cd ~/iptv/android && ./build.sh
 ```
 

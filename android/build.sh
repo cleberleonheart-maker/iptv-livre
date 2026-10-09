@@ -10,6 +10,14 @@ OUT="$PROJ/../apk"
 KS="$PROJ/iptvlivre.keystore"
 APK="$OUT/iptv-livre.apk"
 
+# A senha da keystore vem do ambiente - nunca fica no codigo/repositorio.
+KS_PASS="${IPTV_KS_PASS:-}"
+KEY_PASS="${IPTV_KEY_PASS:-$KS_PASS}"
+if [ -z "$KS_PASS" ]; then
+  echo "ERRO: defina a senha da keystore, ex.:  IPTV_KS_PASS=suasenha $0"
+  exit 1
+fi
+
 [ -f "$AJ" ] || { echo "android.jar nao encontrado: $AJ"; exit 1; }
 
 mkdir -p "$OUT"
@@ -59,14 +67,14 @@ echo "==> zipalign"
 
 if [ ! -f "$KS" ]; then
   echo "==> gerando keystore"
-  keytool -genkeypair -v -keystore "$KS" -storepass iptvlivre123 \
-    -keypass iptvlivre123 -alias iptvlivre -keyalg RSA -keysize 2048 -validity 10950 \
+  keytool -genkeypair -v -keystore "$KS" -storepass "$KS_PASS" \
+    -keypass "$KEY_PASS" -alias iptvlivre -keyalg RSA -keysize 2048 -validity 10950 \
     -dname "CN=IPTV Livre, OU=App, O=IPTV, L=Brasil, S=SP, C=BR" >/dev/null 2>&1
 fi
 
 echo "==> apksigner"
 "$BT/apksigner" sign \
-  --ks "$KS" --ks-pass pass:iptvlivre123 --key-pass pass:iptvlivre123 \
+  --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
   --v1-signing-enabled true --v2-signing-enabled true \
   --out "$APK" "$PROJ/build/aligned.apk"
 
