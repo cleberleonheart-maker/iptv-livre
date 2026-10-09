@@ -68,6 +68,21 @@ hostname -I | awk '{print $1}'
 Na TV, abra o navegador (ou o APK) e acesse `http://SEU_IP:8090`. Deixe a porta
 8090 liberada no firewall se houver.
 
+### HTTPS (opcional, auto-assinado)
+
+Para servir em `https://` (necessário para alguns recursos do navegador, como
+Chromecast em rede), gere um certificado auto-assinado:
+
+```bash
+./ctl.sh tls        # cria .cache/tls/{cert,key}.pem e reinicia em HTTPS
+./ctl.sh tls --off  # remove o certificado e volta para HTTP
+```
+
+O certificado vale para `localhost` e para os IPs da máquina. Abra
+`https://SEU_IP:8090` e aceite o aviso de segurança do navegador (é
+auto-assinado). Também dá para usar variáveis: `TLS=1` força HTTPS,
+`TLS_CERT`/`TLS_KEY` apontam para outros arquivos.
+
 ---
 
 ## Docker
@@ -174,6 +189,9 @@ atraso. O Fire TV Stick é o melhor resultado.
 | Importar M3U | botão **Importar M3U** com a URL da sua lista |
 | Exportar M3U | `http://IP:8090/api/m3u?country=BR` — abre em VLC, Kodi, TiviMate |
 | Logos em cache | os logos passam pelo próprio servidor e ficam em disco (`.cache/`) |
+| **Legendas** | botão **CC** no player: cole uma URL `.srt`/`.vtt` (o servidor converte para WebVTT) |
+| **Transmitir para a TV** | botão **⧉** no player: AirPlay (Safari/iOS) ou Chromecast |
+| **Controle parental** | no painel **Conta**: PIN + categorias bloqueadas (libera por 30 min) |
 
 ### Atalhos de teclado
 
@@ -211,7 +229,10 @@ Todas exigem o cookie de sessão, exceto `/health` e `/api/login`.
 | `GET /api/health/channels?ids=Band.br,Globo.br` | sinal (`on`/`off`/`unknown`) por canal |
 | `GET /api/health/recheck` · `POST` · `GET /api/health/report` | re-verificação sob demanda |
 | `GET /proxy?u=<url>` | proxy de stream (reescreve as playlists HLS) |
+| `GET /sub?u=<url>` | baixa uma legenda e devolve como WebVTT (`.srt` convertido) |
 | `GET /logo?u=<url>` | cache local de logos (tipo detectado pelo conteúdo) |
+| `GET /api/parental` | estado do controle parental + categorias disponíveis |
+| `POST /api/parental` | `{action:"set"\|"unlock"\|"lock"\|"disable", pin, blocked[]}` |
 
 ---
 
@@ -239,10 +260,11 @@ Todas exigem o cookie de sessão, exceto `/health` e `/api/login`.
 │   ├── java/br/com/iptvlivre/MainActivity.java
 │   └── make_launcher_icons.py
 ├── apk/iptv-livre.apk   APK assinado
-└── .cache/              catálogo, EPG, saúde, usuários, histórico e sessões
+└── .cache/              catálogo, EPG, saúde, usuários, histórico, sessões e TLS
 ```
 
-`.cache/` guarda tudo: é seguro apagar, o servidor reconstrói.
+`.cache/` guarda tudo: catálogo, EPG e saúde se reconstroem sozinhos. Já os
+usuários/senhas e o PIN do controle parental moram aqui — faça backup se importam.
 
 ---
 

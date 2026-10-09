@@ -603,4 +603,28 @@ button:hover { filter: brightness(1.08); }
   font-size: 13px;
 }
 .pill.me { border-color: var(--acc); color: var(--acc); }
+.panel-note {
+  color: var(--txt2);
+  font-size: 13px;
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+.chk-list {
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+.chk-list .chk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--card);
+  border: 1px solid #223049;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chk-list .chk input { accent-color: var(--acc); }
 .muted { color: var(--txt2); }

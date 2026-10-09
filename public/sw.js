@@ -1,4 +1,4 @@
-const CACHE = 'iptvlivre-v6';
+const CACHE = 'iptvlivre-v7';
 const CORE = [
   '/',
   '/index.html',
