@@ -1,0 +1,17 @@
+# estado e segredos (usuarios, sessoes, cache, EPG, historico, TLS)
+.cache/
+
+# dependencias
+node_modules/
+
+# build do Android e artefatos
+android/build/
+apk/
+*.apk
+*.idsig
+*.keystore
+
+# logs e ambientes
+*.log
+.env
+.env.*
