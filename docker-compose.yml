@@ -1,0 +1,18 @@
+services:
+  iptv:
+    build: .
+    image: iptv-livre
+    container_name: iptv-livre
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      PORT: "8090"
+      # troque antes de subir (a senha aleatoria so aparece no log do 1o boot)
+      IPTV_USER: "${IPTV_USER:-admin}"
+      IPTV_PASS: "${IPTV_PASS:-}"
+    volumes:
+      - iptv-cache:/app/.cache
+
+volumes:
+  iptv-cache:

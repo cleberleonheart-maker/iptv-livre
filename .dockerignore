@@ -1,0 +1,15 @@
+# dependencias e artefatos que nao entram na imagem
+node_modules
+.cache
+.git
+.gitignore
+android
+apk
+*.apk
+*.keystore
+*.log
+Screenshot*.png
+README.md
+docker-compose.yml
+Dockerfile
+.dockerignore
