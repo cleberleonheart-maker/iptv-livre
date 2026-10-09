@@ -5,6 +5,7 @@ import {
   parseXMLTV,
   rewritePlaylist,
   srtToVtt,
+  paginate,
   makeCastToken,
   verifyCastToken,
 } from '../server.js';
@@ -100,6 +101,27 @@ test('cast token: assinatura adulterada e rejeitada', () => {
   assert.equal(verifyCastToken(t.slice(0, -2) + 'xy'), null);
   assert.equal(verifyCastToken('lixo'), null);
   assert.equal(verifyCastToken(''), null);
+});
+
+test('paginate: fatia, total e sinaliza hasMore', () => {
+  const items = Array.from({ length: 10 }, (_, i) => i);
+  const p1 = paginate(items, 0, 4);
+  assert.deepEqual(p1.items, [0, 1, 2, 3]);
+  assert.equal(p1.total, 10);
+  assert.equal(p1.offset, 0);
+  assert.equal(p1.hasMore, true);
+
+  const p2 = paginate(items, 4, 4);
+  assert.deepEqual(p2.items, [4, 5, 6, 7]);
+  assert.equal(p2.hasMore, true);
+
+  const last = paginate(items, 8, 4);
+  assert.deepEqual(last.items, [8, 9]);
+  assert.equal(last.hasMore, false);
+
+  const beyond = paginate(items, 50, 4);
+  assert.deepEqual(beyond.items, []);
+  assert.equal(beyond.hasMore, false);
 });
 
 test('srtToVtt: converte timestamps e adiciona cabecalho WEBVTT', () => {

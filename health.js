@@ -20,7 +20,11 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CACHE_DIR = path.join(__dirname, '.cache');
+const CACHE_DIR = process.env.IPTV_CACHE_DIR
+  ? path.isAbsolute(process.env.IPTV_CACHE_DIR)
+    ? process.env.IPTV_CACHE_DIR
+    : path.join(__dirname, process.env.IPTV_CACHE_DIR)
+  : path.join(__dirname, '.cache');
 const HEALTH_FILE = path.join(CACHE_DIR, 'health.json');
 
 const UA =

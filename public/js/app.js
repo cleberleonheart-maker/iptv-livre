@@ -8,6 +8,8 @@ const state = {
   items: [],
   shown: 0,
   page: 60,
+  offset: 0,
+  hasMore: false,
   country: 'all',
   category: 'all',
   tab: 'tv',
@@ -15,16 +17,25 @@ const state = {
   query: '',
 };
 
+const PAGE_SIZE = 300; // itens por requisicao ao servidor
+
 const FAVS_KEY = 'iptvlivre.favs';
+const FAVS_REMOVED_KEY = 'iptvlivre.favs.removed';
 
 /* ---------------- favoritos ---------------- */
 
 let favs = new Set();
+let favRemoved = new Set(); // apagados aqui e ainda nao confirmados pelo servidor
 try {
   favs = new Set(JSON.parse(localStorage.getItem(FAVS_KEY) || '[]'));
 } catch {}
-const saveFavs = () =>
+try {
+  favRemoved = new Set(JSON.parse(localStorage.getItem(FAVS_REMOVED_KEY) || '[]'));
+} catch {}
+const saveFavs = () => {
   localStorage.setItem(FAVS_KEY, JSON.stringify([...favs]));
+  localStorage.setItem(FAVS_REMOVED_KEY, JSON.stringify([...favRemoved]));
+};
 
 /* Sincroniza com o servidor (mesmos favoritos no APK e no celular).
    localStorage continua sendo o cache offline. */
@@ -33,21 +44,33 @@ function pushFavs() {
   clearTimeout(favPushTimer);
   favPushTimer = setTimeout(async () => {
     try {
-      await fetch('/api/favs', {
+      const r = await fetch('/api/favs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: [...favs] }),
       });
+      // o servidor passou a ter a lista exata: tombstones nao sao mais necessarios
+      if (r.ok && favRemoved.size) {
+        favRemoved.clear();
+        saveFavs();
+      }
     } catch {}
   }, 400);
 }
+/* Junta o servidor com o local sem perder nada:
+   - a uniao cobre favoritos marcados offline (push pode ter falhado)
+   - os tombstones evitam que o servidor "ressuscite" o que apagamos aqui */
 async function loadServerFavs() {
   try {
     const r = await fetch('/api/favs');
     if (!r.ok) return;
     const d = await r.json();
-    favs = new Set(Array.isArray(d.favs) ? d.favs : []);
+    const server = new Set(Array.isArray(d.favs) ? d.favs : []);
+    const merged = new Set([...favs, ...[...server].filter((id) => !favRemoved.has(id))]);
+    const changed = merged.size !== server.size || [...merged].some((id) => !server.has(id));
+    favs = merged;
     saveFavs();
+    if (changed) pushFavs();
   } catch {}
 }
 
@@ -198,18 +221,23 @@ async function loadItems(reset = true) {
   if (reset) {
     state.items = [];
     state.shown = 0;
+    state.page = 60;
+    state.offset = 0;
+    state.hasMore = false;
   }
   const p = new URLSearchParams();
   p.set('kind', state.kind);
   if (state.country !== 'all') p.set('country', state.country);
   if (state.category !== 'all') p.set('category', state.category);
   if (state.query) p.set('q', state.query);
-  p.set('limit', '6000');
+  p.set('limit', String(PAGE_SIZE));
+  p.set('offset', String(state.offset));
 
   const d = await api('/api/catalog?' + p);
-  state.items = d.items;
-  if (reset) render(true);
-  else render(false);
+  state.items = reset ? d.items : state.items.concat(d.items);
+  state.offset = state.items.length;
+  state.hasMore = !!d.hasMore;
+  render(reset);
 }
 
 /* ---------------- render ---------------- */
@@ -238,7 +266,7 @@ function render(reset) {
   state.shown = Math.min(end, list.length);
 
   empty.hidden = list.length > 0;
-  $('#btnMore').parentElement.hidden = state.shown >= list.length;
+  $('#btnMore').parentElement.hidden = !(state.shown < list.length || state.hasMore);
 }
 
 function cardFor(ch) {
@@ -246,6 +274,8 @@ function cardFor(ch) {
   el.className = 'card' + (favs.has(ch.id) ? ' fav-on' : '') + (ch.kind === 'radio' ? ' is-radio' : '');
   el.tabIndex = 0;
   el.dataset.id = ch.id;
+  el.setAttribute('role', 'button');
+  el.setAttribute('aria-label', ch.name + (favs.has(ch.id) ? ' (favorito)' : ''));
 
   const logoUrl =
     ch.logo && /^https?:\/\//.test(ch.logo)
@@ -294,6 +324,10 @@ function cardFor(ch) {
     e.stopPropagation();
     toggleFav(ch.id);
   };
+  el.querySelector('.fav').setAttribute(
+    'aria-label',
+    favs.has(ch.id) ? 'Remover dos favoritos' : 'Adicionar aos favoritos'
+  );
   const img = el.querySelector('img.logo');
   if (img) {
     img.addEventListener(
@@ -344,8 +378,13 @@ function play(ch, el = null) {
 }
 
 function toggleFav(id) {
-  if (favs.has(id)) favs.delete(id);
-  else favs.add(id);
+  if (favs.has(id)) {
+    favs.delete(id);
+    favRemoved.add(id);
+  } else {
+    favs.add(id);
+    favRemoved.delete(id);
+  }
   saveFavs();
   pushFavs();
   toast(favs.has(id) ? '★ adicionado aos favoritos' : '☆ Removido dos favoritos');
@@ -353,8 +392,15 @@ function toggleFav(id) {
   else {
     const el = grid.querySelector(`[data-id="${CSS.escape(id)}"]`);
     if (el) {
-      el.classList.toggle('fav-on', favs.has(id));
-      el.querySelector('.fav').textContent = favs.has(id) ? '★' : '☆';
+      const on = favs.has(id);
+      el.classList.toggle('fav-on', on);
+      el.setAttribute(
+        'aria-label',
+        (el.querySelector('.name')?.textContent || '') + (on ? ' (favorito)' : '')
+      );
+      const fb = el.querySelector('.fav');
+      fb.textContent = on ? '★' : '☆';
+      fb.setAttribute('aria-label', on ? 'Remover dos favoritos' : 'Adicionar aos favoritos');
     }
   }
   updateFavBtn();
@@ -441,9 +487,15 @@ document.querySelectorAll('.chip').forEach((c) => {
   };
 });
 
-$('#btnMore').onclick = () => {
-  state.page += 60;
-  render(false);
+$('#btnMore').onclick = async () => {
+  if (state.shown < visible().length) {
+    state.page += 60;
+    render(false);
+    return;
+  }
+  if (!state.hasMore) return;
+  // ja mostrou tudo o que baixou: busca a proxima pagina no servidor
+  await loadItems(false);
 };
 
 $('#btnMenu').onclick = () => $('#sidebar').classList.toggle('open');

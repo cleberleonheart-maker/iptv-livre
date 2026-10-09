@@ -406,7 +406,20 @@ button:hover { filter: brightness(1.08); }
     padding-top: 16px;
   }
   #sidebar.open { transform: none; }
-  .quick { display: none; }
+  /* no mobile os filtros ficam numa faixa rolavel em vez de sumirem */
+  #topbar { flex-wrap: wrap; }
+  .search-wrap { max-width: none; }
+  .quick {
+    order: 10;
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .quick::-webkit-scrollbar { display: none; }
+  .chip { flex: 0 0 auto; }
   .brand { min-width: 0; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 9px; }
   .card .logo { height: 56px; }

@@ -15,7 +15,11 @@ import { load as loadHealth, getHealth, recheck as recheckHealth, HEALTH_FILE } 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const CACHE_DIR = path.join(__dirname, '.cache');
+const CACHE_DIR = process.env.IPTV_CACHE_DIR
+  ? path.isAbsolute(process.env.IPTV_CACHE_DIR)
+    ? process.env.IPTV_CACHE_DIR
+    : path.join(__dirname, process.env.IPTV_CACHE_DIR)
+  : path.join(__dirname, '.cache');
 const PORT = Number(process.env.PORT || 8090);
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -81,6 +85,17 @@ setInterval(reloadHealth, 60_000).unref?.();
 /* Re-verificacao sob demanda (auto-ao-falhar e botao "re-verificar agora").
    job roda em segundo plano e o cliente acompanha por /api/health/report. */
 const recheckJob = { running: false, at: 0, total: 0, done: 0, dead: [], startedAt: 0 };
+
+/* Fatia o catalogo para paginacao: offset + limite, com aviso de "tem mais". */
+function paginate(items, offset, limit) {
+  const page = items.slice(offset, offset + limit);
+  return {
+    total: items.length,
+    offset,
+    hasMore: offset + page.length < items.length,
+    items: page,
+  };
+}
 
 function knownStreams(cat) {
   const known = new Map();
@@ -1446,7 +1461,9 @@ async function handleRequest(req, res) {
       const category = url.searchParams.get('category');
       const onlyId = url.searchParams.get('id');
       const kind = url.searchParams.get('kind') || 'tv';
-      const limit = Math.min(Number(url.searchParams.get('limit') || 0) || Infinity, 5000);
+      const limitParam = url.searchParams.get('limit');
+      const limit = limitParam ? Math.min(Number(limitParam) || 0, 5000) : 5000;
+      const offset = Math.max(0, Number(url.searchParams.get('offset') || 0) || 0);
 
       let items = cat.items.filter((i) => !i.isNsfw && !i.closed);
       items = parentalFilter(items, auth.currentUser(req));
@@ -1466,8 +1483,7 @@ async function handleRequest(req, res) {
       return sendJSON(res, 200, {
         stats: cat.stats,
         updatedAt: cat.at,
-        total: items.length,
-        items: items.slice(0, limit),
+        ...paginate(items, offset, limit),
       });
     }
 
@@ -2098,6 +2114,7 @@ export {
   parseXMLTV,
   rewritePlaylist,
   srtToVtt,
+  paginate,
   makeCastToken,
   verifyCastToken,
   start,

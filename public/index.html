@@ -7,7 +7,7 @@
 <title>IPTV Livre</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/css/style.css?v=2026.10.09-5">
+<link rel="stylesheet" href="/css/style.css?v=2026.10.09-6">
 </head>
 <body>
 
@@ -39,7 +39,7 @@
     <button id="btnSearch" class="icon-btn" aria-label="Buscar">🔍</button>
     <button id="btnEpgSearch" class="icon-btn" aria-label="Buscar na programação">📅</button>
   </div>
-  <nav class="quick">
+  <nav class="quick" aria-label="Filtros rápidos">
     <button class="chip active" data-tab="tv">TV</button>
     <button class="chip" data-tab="radio">Rádio</button>
     <button class="chip" data-tab="br">Brasil</button>
@@ -80,7 +80,7 @@
   <div id="radioArt" class="radio-art" aria-hidden="true" hidden></div>
   <div id="plLive" class="pl-live" hidden>AO VIVO · RÁDIO</div>
   <div class="pl-top">
-    <button id="btnBack" class="icon-btn big">✕</button>
+    <button id="btnBack" class="icon-btn big" aria-label="Fechar player">✕</button>
     <div class="pl-title">
       <strong id="plName">—</strong>
       <small id="plMeta">—</small>
@@ -97,17 +97,17 @@
 
 <div id="toast" class="toast" hidden></div>
 
-<div id="panel" class="panel" hidden>
+<div id="panel" class="panel" role="dialog" aria-modal="true" aria-labelledby="panelTitle" hidden>
   <div class="panel-box">
     <div class="panel-head">
-      <h2>Minha conta</h2>
+      <h2 id="panelTitle">Minha conta</h2>
       <button id="panelClose" class="icon-btn big" aria-label="Fechar">✕</button>
     </div>
     <div id="panelBody" class="panel-body"></div>
   </div>
 </div>
 
-<div id="dlg" class="dlg" hidden>
+<div id="dlg" class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle" hidden>
   <div class="dlg-box">
     <h3 id="dlgTitle">Importar M3U</h3>
     <p id="dlgHelp"></p>
@@ -136,8 +136,8 @@
 </div><!-- /#app -->
 
 <script src="/vendor/hls.min.js"></script>
-<script src="/js/player.js?v=2026.10.09-5"></script>
-<script src="/js/login.js?v=2026.10.09-5"></script>
-<script src="/js/app.js?v=2026.10.09-5"></script>
+<script src="/js/player.js?v=2026.10.09-6"></script>
+<script src="/js/login.js?v=2026.10.09-6"></script>
+<script src="/js/app.js?v=2026.10.09-6"></script>
 </body>
 </html>
