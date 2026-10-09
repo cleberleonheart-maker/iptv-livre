@@ -93,18 +93,33 @@ function saveLocalHistory() {
   localStorage.setItem(HIST_KEY, JSON.stringify(Object.fromEntries(historyMap)));
 }
 
-function applyHistory(list) {
-  recents = list.map((h) => h.id);
-  historyMap = new Map(list.map((h) => [h.id, h]));
-  saveLocalHistory();
-}
-
 async function loadServerHistory() {
   try {
     const r = await fetch('/api/history');
     if (!r.ok) return;
     const d = await r.json();
-    if (Array.isArray(d.history)) applyHistory(d.history);
+    const serverList = Array.isArray(d.history) ? d.history : [];
+    const serverBy = new Map(serverList.map((h) => [h.id, h]));
+
+    // merge local+servidor mantendo a versao mais recente de cada id
+    const merged = new Map(historyMap);
+    for (const h of serverList) {
+      const cur = merged.get(h.id);
+      if (!cur || (h.at || 0) >= (cur.at || 0)) merged.set(h.id, h);
+    }
+
+    // sobe o que o servidor nao tem (ou tem mais antigo): nada se perde offline
+    for (const [id, h] of historyMap) {
+      const s = serverBy.get(id);
+      if (!s || (s.at || 0) < (h.at || 0)) sendHistory(h);
+    }
+
+    historyMap = merged;
+    recents = [...merged.values()]
+      .sort((a, b) => (b.at || 0) - (a.at || 0))
+      .map((h) => h.id)
+      .slice(0, 100);
+    saveLocalHistory();
   } catch {}
 }
 
@@ -487,16 +502,34 @@ document.querySelectorAll('.chip').forEach((c) => {
   };
 });
 
+let loadingMore = false;
 $('#btnMore').onclick = async () => {
   if (state.shown < visible().length) {
     state.page += 60;
     render(false);
     return;
   }
-  if (!state.hasMore) return;
+  if (!state.hasMore || loadingMore) return;
   // ja mostrou tudo o que baixou: busca a proxima pagina no servidor
-  await loadItems(false);
+  loadingMore = true;
+  try {
+    await loadItems(false);
+  } finally {
+    loadingMore = false;
+  }
 };
+
+/* Rolagem continua: carrega a proxima pagina quando o rodape chega perto.
+   O botao continua existindo (controle remoto / leitores de tela). */
+if ('IntersectionObserver' in window) {
+  const sentinel = $('#loadMoreWrap');
+  new IntersectionObserver(
+    (entries) => {
+      if (entries.some((e) => e.isIntersecting)) $('#btnMore').click();
+    },
+    { rootMargin: '700px' }
+  ).observe(sentinel);
+}
 
 $('#btnMenu').onclick = () => $('#sidebar').classList.toggle('open');
 $('#btnBack').onclick = () => Player.close();
@@ -516,7 +549,7 @@ document.addEventListener('keydown', (e) => {
   if (Player.isOpen) {
     if (e.key === 'f' || e.key === 'F') updateFavBtn();
     // setas L/R percorrem os botoes do topo do player no remoto
-    const btns = ['btnBack', 'btnQual', 'btnCC', 'btnCast', 'btnSleep', 'btnFav']
+    const btns = ['btnBack', 'btnQual', 'btnCC', 'btnCast', 'btnFs', 'btnSleep', 'btnFav']
       .map((id) => document.getElementById(id))
       .filter((b) => b && !b.hidden && b.offsetParent !== null);
     if (btns.length && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {

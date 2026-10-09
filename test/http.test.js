@@ -102,6 +102,22 @@ test('login e paginacao do catalogo (offset/hasMore)', async () => {
   assert.ok(dl.total >= dl.items.length);
 });
 
+test('dlna discover exige login e responde lista de aparelhos', async () => {
+  await ensureStarted();
+  const anon = await req('GET', '/api/dlna/discover');
+  assert.equal(anon.status, 401);
+
+  const login = await req('POST', '/api/login', {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user: 'tester', pass: 'senha123' }),
+  });
+  const sid = /iptv_sid=([^;]+)/.exec(login.headers['set-cookie'] || '')?.[1];
+  const r = await req('GET', '/api/dlna/discover', { headers: { Cookie: `iptv_sid=${sid}` } });
+  assert.equal(r.status, 200, r.body);
+  const data = JSON.parse(r.body);
+  assert.ok(Array.isArray(data.devices));
+});
+
 test.after(() => {
   server.close();
   fs.rmSync(tmp, { recursive: true, force: true });

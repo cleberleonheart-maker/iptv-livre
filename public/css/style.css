@@ -271,11 +271,13 @@ button:hover { filter: brightness(1.08); }
   position: absolute;
   top: 0; left: 0; right: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 10px 12px;
+  padding: 12px 14px;
   background: linear-gradient(#000c, #0000);
 }
+.pl-top:fullscreen { position: relative; }
 .pl-title { flex: 1; min-width: 0; }
 .pl-title strong { display: block; font-size: 16px; }
 .pl-title small { color: var(--txt2); font-size: 12px; }

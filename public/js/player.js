@@ -341,21 +341,7 @@ const Player = (() => {
     } catch {}
   }
 
-  async function startCast() {
-    if (!current) return;
-    // Safari/iOS: picker nativo de AirPlay
-    if (video.webkitShowPlaybackTargetPicker) {
-      video.webkitShowPlaybackTargetPicker();
-      return;
-    }
-    const ok = await loadCastSdk();
-    if (!ok || !window.chrome || !window.chrome.cast) {
-      if (window.toast) window.toast('Cast/AirPlay indisponível neste aparelho');
-      return;
-    }
-    if (!castReady) initCast();
-    const src = queue[idx] ? queue[idx].url : null;
-    if (!src) return;
+  async function chromeCastPlay(src) {
     // o receiver nao tem o cookie de sessao: usa um token curto emitido pelo servidor
     let castToken = '';
     try {
@@ -379,15 +365,87 @@ const Player = (() => {
     }
   }
 
+  async function startCast() {
+    if (!current) return;
+    // Safari/iOS: picker nativo de AirPlay
+    if (video.webkitShowPlaybackTargetPicker) {
+      video.webkitShowPlaybackTargetPicker();
+      return;
+    }
+    const src = queue[idx] ? queue[idx].url : null;
+    if (!src) return;
+    const ok = await loadCastSdk();
+    if (ok && window.chrome && window.chrome.cast) {
+      if (!castReady) initCast();
+      return chromeCastPlay(src);
+    }
+    // sem Chromecast/AirPlay: tenta DLNA/UPnP na rede
+    return dlnaFlow(src);
+  }
+
+  /* DLNA/UPnP: o servidor varre a rede (SSDP) e manda o stream tocar na TV.
+     Usado quando o Chromecast nao esta disponivel (ex.: Android TV WebView). */
+  async function dlnaFlow(src) {
+    if (!window.openDlg || !src || !current) return;
+    try {
+      const r = await fetch('/api/dlna/discover');
+      if (!r.ok) throw new Error('erro ' + r.status);
+      const d = await r.json();
+      const devices = Array.isArray(d.devices) ? d.devices : [];
+      if (!devices.length) {
+        if (window.toast) window.toast('nenhuma TV DLNA/UPnP encontrada');
+        return;
+      }
+      const picked = await window.openDlg({
+        title: 'Transmitir via DLNA',
+        help: current.name,
+        choices: devices.map((dev) => ({ label: dev.name, value: JSON.stringify(dev) })),
+      });
+      if (!picked) return;
+      const device = JSON.parse(picked);
+      const rep = await fetch('/api/dlna/play', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device, url: src }),
+      });
+      const out = await rep.json().catch(() => ({}));
+      if (rep.ok) {
+        if (window.toast) window.toast('transmitindo para ' + (device.name || 'a TV'));
+      } else {
+        if (window.toast) window.toast('falhou: ' + (out.error || 'não foi possível tocar na TV'));
+      }
+    } catch {
+      if (window.toast) window.toast('não foi possível conectar à TV');
+    }
+  }
+
   document.getElementById('btnCast')?.addEventListener('click', startCast);
 
   function updatePlayerButtons() {
     const cc = document.getElementById('btnCC');
     const cast = document.getElementById('btnCast');
+    const fs = document.getElementById('btnFs');
     const audio = isAudio(current);
     if (cc) cc.hidden = !current || audio;
     if (cast) cast.hidden = !current || !castAvailable();
+    if (fs) fs.hidden = !current || audio;
   }
+
+  document.getElementById('btnFs')?.addEventListener('click', async () => {
+    const playerBox = document.getElementById('player');
+    if (!playerBox) return;
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else if (video.webkitEnterFullscreen && video.webkitSupportsFullscreen) {
+        video.webkitEnterFullscreen(); // iOS Safari
+      } else if (playerBox.requestFullscreen) {
+        await playerBox.requestFullscreen();
+      } else if (window.toast) {
+        window.toast('tela cheia não disponível neste aparelho');
+      }
+    } catch {}
+  });
 
   /* Abre o seletor; escolher reordena o queue para o link virar o primeiro.
      Devolve o indice escolhido (ou null se cancelou). */

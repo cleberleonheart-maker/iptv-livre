@@ -8,6 +8,10 @@ import {
   paginate,
   makeCastToken,
   verifyCastToken,
+  parseSsdp,
+  extractDlnaServices,
+  xmlEscape,
+  dlnaEnvelope,
 } from '../server.js';
 
 test('parseM3U: extrai nome, logo, grupo e url', () => {
@@ -122,6 +126,36 @@ test('paginate: fatia, total e sinaliza hasMore', () => {
   const beyond = paginate(items, 50, 4);
   assert.deepEqual(beyond.items, []);
   assert.equal(beyond.hasMore, false);
+});
+
+test('parseSsdp: extrai os cabecalhos da resposta M-SEARCH', () => {
+  const msg = 'HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: http://192.168.0.10:8200/desc.xml\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n';
+  const h = parseSsdp(msg);
+  assert.equal(h.location, 'http://192.168.0.10:8200/desc.xml');
+  assert.equal(h['cache-control'], 'max-age=1800');
+  assert.equal(h.st, 'urn:schemas-upnp-org:device:MediaRenderer:1');
+});
+
+test('extractDlnaServices: acha AVTransport e controlURL', () => {
+  const xml =
+    '<root><device><friendlyName>TV da Sala</friendlyName>' +
+    '<serviceList>' +
+    '<service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>' +
+    '<controlURL>/upnp/control/AVTransport1</controlURL></service>' +
+    '<service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>' +
+    '<controlURL>/upnp/control/RenderingControl1</controlURL></service>' +
+    '</serviceList></device></root>';
+  const services = extractDlnaServices(xml);
+  assert.equal(services.length, 2);
+  assert.ok(services.some((s) => /AVTransport/.test(s.type) && s.control === '/upnp/control/AVTransport1'));
+});
+
+test('xmlEscape e dlnaEnvelope geram SOAP valido', () => {
+  assert.equal(xmlEscape('a<b&"c">'), 'a&lt;b&amp;&quot;c&quot;&gt;');
+  const env = dlnaEnvelope('Play', '<Speed>1</Speed>');
+  assert.match(env, /u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/);
+  assert.match(env, /<InstanceID>0<\/InstanceID>/);
+  assert.match(env, /<Speed>1<\/Speed>/);
 });
 
 test('srtToVtt: converte timestamps e adiciona cabecalho WEBVTT', () => {

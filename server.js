@@ -8,6 +8,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import dns from 'node:dns/promises';
+import dgram from 'node:dgram';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.js';
@@ -267,6 +268,208 @@ function verifyCastToken(token) {
   const exp = Number(payload.slice(0, dot));
   if (!exp || exp < Date.now()) return null;
   return payload.slice(dot + 1) || null; // usuario
+}
+
+/* ------------------------------------------------------------------ *
+ * DLNA / UPnP: descobrir a TV (SSDP) e mandar o stream tocar nela
+ * ------------------------------------------------------------------
+ * O navegador nao faz UDP, entao quem varre a rede e o servidor.
+ * A TV baixa o stream pelo /proxy com um token curto (o mesmo do Cast),
+ * porque o receptor dela tambem nao tem o cookie de sessao. */
+
+function parseSsdp(text) {
+  const out = {};
+  for (const line of String(text).split(/\r?\n/)) {
+    const i = line.indexOf(':');
+    if (i <= 0) continue;
+    out[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+
+function extractDlnaServices(body) {
+  const services = [];
+  const list = /<serviceList>([\s\S]*?)<\/serviceList>/.exec(String(body))?.[1] || String(body);
+  for (const m of list.matchAll(/<service>([\s\S]*?)<\/service>/g)) {
+    const s = m[1];
+    const type = /<serviceType>([\s\S]*?)<\/serviceType>/.exec(s)?.[1]?.trim();
+    const control = /<controlURL>([\s\S]*?)<\/controlURL>/.exec(s)?.[1]?.trim();
+    if (type && control) services.push({ type, control: control.replace(/&amp;/g, '&') });
+  }
+  return services;
+}
+
+function dlnaFriendlyName(body) {
+  return /<friendlyName>([\s\S]*?)<\/friendlyName>/.exec(String(body))?.[1]
+    ?.replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim() || '';
+}
+
+function xmlEscape(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/* Varre a rede com M-SEARCH e devolve os MediaRenderers com AVTransport. */
+function ssdpSearch(sts = ['urn:schemas-upnp-org:device:MediaRenderer:1'], wait = 2500) {
+  return new Promise((resolve) => {
+    const seen = new Map(); // location -> headers
+    let closed = false;
+    const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    const finish = () => {
+      if (closed) return;
+      closed = true;
+      try {
+        sock.close();
+      } catch {}
+      clearTimeout(timer);
+      resolve([...seen.values()]);
+    };
+    const timer = setTimeout(finish, wait);
+    sock.on('error', finish);
+    sock.on('message', (msg) => {
+      const head = parseSsdp(msg.toString('utf8'));
+      const loc = head.location || head.LOCATION;
+      if (!loc) return;
+      const key = loc.replace(/^https?:\/\//i, '');
+      if (!seen.has(key)) seen.set(key, head);
+    });
+    for (const st of sts) {
+      const m = [
+        'M-SEARCH * HTTP/1.1',
+        'HOST: 239.255.255.250:1900',
+        'MAN: "ssdp:discover"',
+        'MX: 2',
+        `ST: ${st}`,
+        '', '',
+      ].join('\r\n');
+      try {
+        sock.send(Buffer.from(m), 1900, '239.255.255.250');
+      } catch {}
+    }
+  });
+}
+
+/* Baixa o XML de descricao e devolve { body, services }. */
+function fetchDlnaDescription(location, timeoutMs = 4000) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(location);
+    } catch {
+      return reject(new Error('location invalida'));
+    }
+    if (!/^https?:$/.test(u.protocol)) return reject(new Error('protocolo nao suportado'));
+    const mod = u.protocol === 'https:' ? https : http;
+    const rq = mod.get(u, { timeout: timeoutMs, headers: { 'User-Agent': UA } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        resolve({ body, services: extractDlnaServices(body) });
+      });
+    });
+    rq.setTimeout(timeoutMs, () => rq.destroy(new Error('timeout')));
+    rq.on('error', reject);
+  });
+}
+
+async function dlnaDiscover() {
+  const heads = await ssdpSearch(
+    ['urn:schemas-upnp-org:device:MediaRenderer:1', 'upnp:rootdevice'],
+    2500
+  );
+  const locs = [];
+  for (const h of heads) {
+    if (h.location && !locs.includes(h.location)) locs.push(h.location);
+  }
+  const results = await Promise.allSettled(
+    locs.slice(0, 10).map(async (loc) => {
+      const d = await fetchDlnaDescription(loc);
+      const av = d.services.find((s) => /AVTransport/i.test(s.type));
+      if (!av) return null;
+      return { name: dlnaFriendlyName(d.body) || loc, location: loc, control: av.control };
+    })
+  );
+  return results
+    .filter((r) => r.status === 'fulfilled' && r.value)
+    .map((r) => r.value);
+}
+
+/* Envia um SOAP para o controle da TV e aceita apenas 2xx. */
+function dlnaSoap(control, soapAction, body, timeoutMs = 6000) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(control);
+    } catch {
+      return reject(new Error('control invalida'));
+    }
+    if (!/^https?:$/.test(u.protocol)) return reject(new Error('protocolo nao suportado'));
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.request(
+      u,
+      {
+        method: 'POST',
+        timeout: timeoutMs,
+        headers: {
+          'Content-Type': 'text/xml; charset="utf-8"',
+          SOAPAction: `"${soapAction}"`,
+          'Content-Length': Buffer.byteLength(body),
+          Connection: 'close',
+          'User-Agent': UA,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const data = Buffer.concat(chunks).toString('utf8');
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve(data);
+          else reject(new Error(`SOAP ${res.statusCode}: ${data.slice(0, 300)}`));
+        });
+      }
+    );
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function dlnaEnvelope(action, extra) {
+  return (
+    '<?xml version="1.0" encoding="utf-8"?>' +
+    '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' +
+    's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
+    '<s:Body>' +
+    `<u:${action} xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">` +
+    '<InstanceID>0</InstanceID>' +
+    extra +
+    `</u:${action}>` +
+    '</s:Body>' +
+    '</s:Envelope>'
+  );
+}
+
+/* Pede para a TV tocar a URL (ja reescrita para o proxy com token). */
+async function dlnaPlay(device, absUrl) {
+  const base = new URL(device.control, new URL(device.location));
+  await dlnaSoap(
+    base.toString(),
+    'urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI',
+    dlnaEnvelope('SetAVTransportURI', `<CurrentURI>${xmlEscape(absUrl)}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>`)
+  );
+  await dlnaSoap(
+    base.toString(),
+    'urn:schemas-upnp-org:service:AVTransport:1#Play',
+    dlnaEnvelope('Play', '<Speed>1</Speed>')
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -1629,6 +1832,38 @@ async function handleRequest(req, res) {
       return sendJSON(res, 200, { token: makeCastToken(me), ttl: CAST_TTL / 1000 });
     }
 
+    if (p === '/api/dlna/discover' && req.method === 'GET') {
+      const devices = await dlnaDiscover();
+      return sendJSON(res, 200, { devices });
+    }
+
+    if (p === '/api/dlna/play' && req.method === 'POST') {
+      const me = auth.currentUser(req);
+      const body = await readBody(req);
+      let data = {};
+      try {
+        data = JSON.parse(body || '{}');
+      } catch {}
+      const device = data.device;
+      const target = String(data.url || '');
+      if (!device || !device.control || !target)
+        return sendJSON(res, 400, { error: 'informe device e url' });
+      if (!/^https?:/.test(target))
+        return sendJSON(res, 400, { error: 'url invalida' });
+      // a TV nao tem o cookie de sessao: usa token curto no /proxy
+      const abs = new URL(
+        '/proxy?u=' + encodeURIComponent(target) +
+          '&token=' + encodeURIComponent(makeCastToken(me)),
+        `http://${req.headers.host || 'localhost'}`
+      ).toString();
+      try {
+        await dlnaPlay(device, abs);
+        return sendJSON(res, 200, { ok: true });
+      } catch (err) {
+        return sendJSON(res, 502, { error: err.message });
+      }
+    }
+
     if (p === '/api/parental' && req.method === 'GET') {
       const me = auth.currentUser(req);
       const cat = await buildCatalog();
@@ -2117,6 +2352,10 @@ export {
   paginate,
   makeCastToken,
   verifyCastToken,
+  parseSsdp,
+  extractDlnaServices,
+  xmlEscape,
+  dlnaEnvelope,
   start,
   server,
 };
