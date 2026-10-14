@@ -1,4 +1,4 @@
-const CACHE = 'iptvlivre-v10';
+const CACHE = 'iptvlivre-v13';
 const CORE = [
   '/',
   '/index.html',
@@ -7,6 +7,7 @@ const CORE = [
   '/js/player.js',
   '/js/login.js',
   '/vendor/hls.min.js',
+  '/vendor/mpegts.min.js',
   '/manifest.webmanifest',
   '/icons/icon.svg',
 ];
@@ -48,20 +49,6 @@ async function networkFirst(req) {
   }
 }
 
-async function staleWhileRevalidate(event, req) {
-  const cache = await caches.open(CACHE);
-  const hit = await cache.match(req, MATCH);
-  const net = fetch(req)
-    .then((res) => {
-      if (res && res.ok) cache.put(req, res.clone());
-      return res;
-    })
-    .catch(() => null);
-  // mantem o worker vivo ate o revalidate terminar (mesmo com hit no cache)
-  event.waitUntil(net.catch(() => {}));
-  return hit || (await net) || Response.error();
-}
-
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
@@ -76,9 +63,10 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // estaticos do proprio site: mostra rapido e atualiza em segundo plano
+  // estaticos do proprio site: sempre rede (servidor local), cache so como
+  // reserva offline. assim toda mudanca pega na primeira recarga.
   if (url.origin === self.location.origin) {
-    e.respondWith(staleWhileRevalidate(e, req));
+    e.respondWith(networkFirst(req));
     return;
   }
 

@@ -82,3 +82,51 @@ test('cookie malformado nao lanca excecao', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('primeiro usuario e admin; os demais nao sao', async () => {
+  const { auth, dir, created } = mkAuth();
+  try {
+    // criado com IPTV_USER/IPTV_PASS ou aleatorio: sempre vira admin
+    assert.equal(auth.isAdmin(created.user), true);
+    await auth.addUser('bob', 'senha123');
+    assert.equal(auth.isAdmin('bob'), false);
+    assert.deepEqual(auth.users(), [
+      { user: created.user, admin: true },
+      { user: 'bob', admin: false },
+    ]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('admin nao pode ser removido', async () => {
+  const { auth, dir, created } = mkAuth();
+  try {
+    // admin nunca saiu: mesmo chamando direto, removeUser recusa
+    assert.equal(auth.removeUser(created.user), false);
+    assert.ok(auth.isAdmin(created.user));
+
+    // e nao remove o admin mesmo com varios usuarios
+    await auth.addUser('bob', 'senha123');
+    assert.equal(auth.removeUser(created.user), false);
+    assert.equal(auth.removeUser('bob'), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('usuarios.json antigo (sem admin) migra para o primeiro usuario', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iptvauth-'));
+  try {
+    fs.writeFileSync(
+      path.join(dir, 'users.json'),
+      JSON.stringify({ users: [{ user: 'velho', salt: 's', hash: 'h' }], createdAt: 1 })
+    );
+    const auth = createAuth(dir);
+    assert.equal(auth.isAdmin('velho'), true);
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'users.json'), 'utf8'));
+    assert.equal(onDisk.users[0].admin, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -126,6 +126,92 @@ sudo systemctl enable --now iptv-livre
 
 ---
 
+## Bibliotecas locais (séries no HD)
+
+Se você tem séries em MP4 no HD, dá para assisti-las pelo mesmo player (web
+e APK): aponte o servidor para a pasta e os arquivos entram como itens do
+catálogo, servidos por `/media` com busca (Range) e login.
+
+```bash
+mkdir /mnt/series                 # onde o HD está montado
+systemctl --user edit --full iptv.service
+```
+
+Adicione ao bloco `[Service]` (e reinicie):
+
+```
+Environment=IPTV_MEDIA_DIR=/mnt/series
+```
+
+```bash
+systemctl --user daemon-reload && systemctl --user restart iptv.service
+```
+
+Como a pasta é lida:
+
+- cada **MP4** (`.mp4`/`.m4v`/`.webm`/`.mov`) vira um card, com o nome saindo
+  do arquivo ("`Minha Serie - S01E02.mp4`" → "`Minha Serie S01E02`");
+- a pasta da série pode ter `poster.jpg`/`cover.jpg`/`fanart.jpg` (ou qualquer
+  imagem) — vira a arte do card;
+- os arquivos são servidos **somente autenticado** e **não saem** no export
+  M3U (só fazem sentido na mesma origem);
+- `.mkv`/`.avi` ainda **não** são suportados (o WebView não decodifica);
+  formatos com transcodificação via ffmpeg ficam para depois.
+
+---
+
+## Guia de programação (EPG)
+
+O guia padrão é a fonte BR do `epg.pw`. Se ela estiver fora do ar, o servidor
+tenta automaticamente as fontes alternativas do mesmo país (hoje `epgshare01`)
+— o guia continua funcionando em vez de sumir. Se **todas** falharem, ele segue
+usando o último guia salvo em disco.
+
+```
+Environment=IPTV_EPG=https://epg.pw/xmltv/epg_BR.xml.gz          # fonte principal
+Environment=IPTV_EPG_FALLBACK=https://epgshare01.online/epgshare01/epg_ripper_BR1.xml.gz,https://epgshare01.online/epgshare01/epg_ripper_BR2.xml.gz
+```
+
+Pelo app, o botão **EPG** lista os países disponíveis e carrega o escolhido
+(com o mesmo fallback). O painel mostra ⚠ quando a fonte está fora do ar.
+
+---
+
+## Gravações (DVR)
+
+Dá para gravar um canal agora (botão ⏺ no player) ou agendar pelo guia (⏺ em
+cada programa do EPG). O vídeo é copiado sem re-encodar (grava o que o canal
+manda); o áudio é normalizado para AAC quando precisa. Desligável com
+`IPTV_DVR=0`. As gravações prontas ficam em `<IPTV_MEDIA_DIR>/recordings` e são
+servidas por `/media/recordings` (toque pelo painel → "Gravações").
+
+Ajustes opcionais no `[Service]`:
+
+```
+Environment=IPTV_DVR_MAX_CONCURRENT=2   # gravações simultâneas (padrão 2)
+Environment=IPTV_DVR_MAX_GB=20          # teto de disco p/ gravações prontas (padrão 20)
+Environment=IPTV_DVR_KEEP=0             # quantas manter (0 = só o teto de GB)
+Environment=IPTV_DVR_TICK_MS=20000      # intervalo do agendador (padrão 20s)
+```
+
+Ao agendar, se passar do limite de simultâneas o servidor responde com conflito
+(o app pergunta se quer forçar). Quando o disco passa do teto, as gravações
+prontas **mais antigas** vão sendo apagadas automaticamente — as que estão
+gravando/agendadas nunca são tocadas.
+
+### Canais HEVC
+
+Muitos canais mandam vídeo **HEVC/H.265**, que o navegador **não** toca e que
+este servidor não consegue re-encodar ao vivo (2 núcleos). Para esses casos a
+gravação fica marcada com ⚠ no painel e ganha dois botões:
+
+- **Baixar** — baixa o `.ts` para tocar no VLC/TV (sem re-encodar);
+- **Converter para H.264** — re-encoda o arquivo já pronto, **sem pressa**, em
+  segundo plano (uma conversão por vez), virando um `.mp4` que toca no app.
+  Quando termina, o `.ts` original é apagado e dá para **Assistir** direto.
+
+---
+
 ## APK (Android TV / Fire TV / TV Box)
 
 ```bash
@@ -253,6 +339,7 @@ Todas exigem o cookie de sessão, exceto `/health` e `/api/login`.
 │   ├── css/style.css
 │   ├── js/{login,app,player}.js
 │   ├── vendor/hls.min.js
+│   ├── vendor/mpegts.min.js   (MPEG-TS cru, ex.: canais sem manifesto .m3u8)
 │   ├── sw.js            service worker (PWA offline)
 │   └── manifest.webmanifest
 ├── android/             projeto do APK (sem Gradle)

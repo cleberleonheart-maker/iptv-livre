@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseM3U,
+  inferStreamType,
+  parseEpisode,
   parseXMLTV,
   rewritePlaylist,
   srtToVtt,
@@ -33,6 +35,55 @@ http://stream.example/radio.mp3`;
 test('parseM3U: ignora comentarios e linhas de tag', () => {
   const out = parseM3U('#EXTM3U\n# comment\n#EXT-X-TARGETDURATION:6\n');
   assert.equal(out.length, 0);
+});
+
+test('inferStreamType: separa live, filme e serie por grupo e url', () => {
+  assert.equal(inferStreamType({ group: 'CANAIS | BR', title: 'Globo' }), 'live');
+  assert.equal(inferStreamType({ group: 'FILMES', title: 'Matrix' }), 'movie');
+  assert.equal(
+    inferStreamType({ group: 'SERIES', title: 'Breaking Bad S01E01' }),
+    'series'
+  );
+  assert.equal(
+    inferStreamType({ group: 'VOD', title: 'X', url: 'http://h/movie/u/p/1.mp4' }),
+    'movie'
+  );
+  assert.equal(
+    inferStreamType({ group: 'CANAIS', title: 'Y', url: 'http://h/series/u/p/9.mkv' }),
+    'series'
+  );
+  assert.equal(
+    inferStreamType({ group: '', title: 'Clipe', url: 'http://h/y.mp4' }),
+    'movie'
+  );
+  assert.equal(
+    inferStreamType({ group: '', title: 'News', url: 'http://h/live/1.m3u8' }),
+    'live'
+  );
+});
+
+test('parseEpisode: extrai base, temporada e episodio', () => {
+  assert.deepEqual(parseEpisode('Breaking Bad S01E02'), {
+    base: 'Breaking Bad',
+    season: 1,
+    episode: 2,
+  });
+  assert.deepEqual(parseEpisode('Lost 3x05'), { base: 'Lost', season: 3, episode: 5 });
+  assert.deepEqual(parseEpisode('Nome Temporada 2 Episódio 4'), {
+    base: 'Nome',
+    season: 2,
+    episode: 4,
+  });
+  assert.deepEqual(parseEpisode('Coisa Episódio 7'), {
+    base: 'Coisa',
+    season: 1,
+    episode: 7,
+  });
+  assert.deepEqual(parseEpisode('Filme Sem Padrao'), {
+    base: 'Filme Sem Padrao',
+    season: 1,
+    episode: 0,
+  });
 });
 
 test('parseXMLTV: extrai canais e programas', () => {

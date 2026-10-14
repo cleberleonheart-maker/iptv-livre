@@ -7,7 +7,7 @@
 <title>IPTV Livre</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/css/style.css?v=2026.10.09-7">
+<link rel="stylesheet" href="/css/style.css?v=2026.10.11">
 </head>
 <body>
 
@@ -33,6 +33,7 @@
       <h1>IPTV Livre</h1>
       <small id="statsLine">carregando…</small>
     </div>
+    <span id="clock" class="clock" aria-label="Relógio">--:--</span>
   </div>
   <div class="search-wrap">
     <input id="search" type="search" placeholder="Buscar canal…" autocomplete="off" spellcheck="false">
@@ -47,6 +48,7 @@
     <button class="chip" data-tab="recent">Recentes</button>
     <button class="chip" id="btnEpg">Guia EPG</button>
     <button class="chip" id="btnNow">Agora</button>
+    <button class="chip" id="btnGrid">Programação</button>
     <button class="chip" id="btnImport">Importar M3U</button>
     <button class="chip" id="btnExport">Exportar M3U</button>
     <button class="chip" id="btnRecheck">Re-verificar</button>
@@ -81,14 +83,21 @@
   <div id="plLive" class="pl-live" hidden>AO VIVO · RÁDIO</div>
   <div class="pl-top">
     <button id="btnBack" class="icon-btn big" aria-label="Fechar player">✕</button>
+    <button id="btnPrev" class="icon-btn big" aria-label="Canal anterior" hidden>⤺</button>
     <div class="pl-title">
       <strong id="plName">—</strong>
       <small id="plMeta">—</small>
+      <small id="plClock" class="pl-clock">--:--:--</small>
     </div>
     <button id="btnQual" class="icon-btn big" aria-label="Qualidade" hidden>⚙</button>
+    <button id="btnAudio" class="icon-btn big" aria-label="Faixa de áudio" hidden>🔊</button>
     <button id="btnCC" class="icon-btn big" aria-label="Legendas" hidden>CC</button>
+    <button id="btnCatchup" class="icon-btn big" aria-label="Ver do início" hidden>⏪</button>
+    <button id="btnRec" class="icon-btn big" aria-label="Gravar canal" hidden>⏺</button>
+    <button id="btnTs" class="icon-btn big" aria-label="Timeshift (rebobinar)" hidden>⏪</button>
     <button id="btnCast" class="icon-btn big" aria-label="Transmitir para a TV" hidden>⧉</button>
     <button id="btnFs" class="icon-btn big" aria-label="Tela cheia" hidden>⛶</button>
+    <button id="btnShare" class="icon-btn big" aria-label="Compartilhar canal">🔗</button>
     <button id="btnSleep" class="icon-btn big" aria-label="Timer de sono">⏱ off</button>
     <button id="btnFav" class="icon-btn big" aria-label="Favoritar">☆</button>
   </div>
@@ -97,6 +106,7 @@
 </div>
 
 <div id="toast" class="toast" hidden></div>
+<div id="zapOverlay" class="zap-overlay" hidden></div>
 
 <div id="panel" class="panel" role="dialog" aria-modal="true" aria-labelledby="panelTitle" hidden>
   <div class="panel-box">
@@ -130,15 +140,59 @@
     <div id="parCats" class="dlg-choices chk-list"></div>
     <div class="dlg-actions">
       <button id="parCancel">Cancelar</button>
-      <button id="parOk">Salvar</button>
+      <button id="parOk">OK</button>
     </div>
+  </div>
+</div>
+
+<div id="epgGrid" class="epg-grid" role="dialog" aria-modal="true" aria-labelledby="egTitle" hidden>
+  <div class="eg-box">
+    <div class="eg-head">
+      <h3 id="egTitle">Programação</h3>
+      <div class="eg-nav">
+        <button id="egPrev" class="ghost tiny" aria-label="Período anterior">◀</button>
+        <button id="egNow" class="ghost tiny">Agora</button>
+        <button id="egNext" class="ghost tiny" aria-label="Próximo período">▶</button>
+        <button id="egClose" class="icon-btn big" aria-label="Fechar">✕</button>
+      </div>
+    </div>
+    <div id="egBody" class="eg-body"></div>
+  </div>
+</div>
+
+<div id="shareDlg" class="dlg" hidden>
+  <div class="dlg-box">
+    <h3>Compartilhar canal</h3>
+    <p id="shareName"></p>
+    <img id="shareQr" class="share-qr" alt="QR code do link" hidden>
+    <input id="shareUrl" type="text" readonly>
+    <div class="dlg-actions">
+      <button id="shareClose">Fechar</button>
+      <button id="shareCopy">Copiar link</button>
+    </div>
+  </div>
+</div>
+
+<div id="m3uDlg" class="dlg" hidden>
+  <div class="dlg-box">
+    <h3>Lista M3U</h3>
+    <p id="m3uHelp">Escaneie o QR ou copie o link e cole no player da TV (IBO Player, TiviMate, VLC…).</p>
+    <img id="m3uQr" class="share-qr" alt="QR code da lista M3U" hidden>
+    <input id="m3uUrl" type="text" readonly>
+    <div class="dlg-actions">
+      <button id="m3uClose">Fechar</button>
+      <button id="m3uCopy">Copiar link</button>
+    </div>
+  </div>
+</div>
   </div>
 </div>
 </div><!-- /#app -->
 
 <script src="/vendor/hls.min.js"></script>
-<script src="/js/player.js?v=2026.10.09-7"></script>
-<script src="/js/login.js?v=2026.10.09-7"></script>
-<script src="/js/app.js?v=2026.10.09-7"></script>
+<script src="/vendor/mpegts.min.js"></script>
+<script src="/js/player.js?v=2026.10.11b"></script>
+<script src="/js/login.js?v=2026.10.11"></script>
+<script src="/js/app.js?v=2026.10.11"></script>
 </body>
 </html>

@@ -16,11 +16,13 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
+import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -42,6 +44,9 @@ public class MainActivity extends Activity {
     private EditText urlInput;
     private TextView setupMsg;
     private String pendingUrl;
+    private FrameLayout webContainer;
+    private View fullscreenView;
+    private WebChromeClient.CustomViewCallback fullscreenCallback;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -188,6 +193,7 @@ public class MainActivity extends Activity {
         web.setLongClickable(false);
         web.setHapticFeedbackEnabled(false);
         web.setHorizontalScrollBarEnabled(false);
+        web.setHorizontalScrollBarEnabled(false);
         web.setVerticalScrollBarEnabled(false);
 
         WebSettings s = web.getSettings();
@@ -228,10 +234,66 @@ public class MainActivity extends Activity {
                 }
                 return false;
             }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                // deixa a pagina "presa" a largura da janela, igual ao
+                // navegador: nada de rolamento horizontal nem area preta
+                // nas laterais quando se mexe com o controle
+                view.scrollTo(0, 0);
+                view.evaluateJavascript(
+                        "(function(){"
+                        + "var d=document.documentElement,b=document.body;"
+                        + "d.style.overflowX='hidden';b.style.overflowX='hidden';"
+                        + "d.style.width='100vw';b.style.width='100vw';"
+                        + "if(window.scrollTo)window.scrollTo(0,0);"
+                        + "})();", null);
+            }
         });
 
+        // tela cheia do player (botao ⛶): o WebView sem WebChromeClient ignora
+        // o requestFullscreen da pagina, entao tratamos aqui.
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onShowCustomView(View view, CustomViewCallback callback) {
+                if (fullscreenView != null) {
+                    callback.onCustomViewHidden();
+                    return;
+                }
+                fullscreenView = view;
+                fullscreenCallback = callback;
+                view.setBackgroundColor(Color.BLACK);
+                webContainer.addView(view, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+                web.setVisibility(View.GONE);
+                immersive();
+            }
+
+            @Override
+            public void onHideCustomView() {
+                exitFullscreen();
+            }
+        });
+
+        webContainer = new FrameLayout(this);
+        webContainer.addView(web, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
         web.loadUrl(url + "/");
-        setContentView(web);
+        setContentView(webContainer);
+        immersive();
+    }
+
+    private void exitFullscreen() {
+        if (fullscreenView == null) return;
+        webContainer.removeView(fullscreenView);
+        fullscreenView = null;
+        if (web != null) web.setVisibility(View.VISIBLE);
+        if (fullscreenCallback != null) {
+            fullscreenCallback.onCustomViewHidden();
+            fullscreenCallback = null;
+        }
         immersive();
     }
 
@@ -277,6 +339,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        exitFullscreen();
         if (web != null) {
             web.loadUrl("about:blank");
             web.destroy();
@@ -287,6 +350,10 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (fullscreenView != null) {
+            exitFullscreen();
+            return;
+        }
         if (web == null) {
             super.onBackPressed();
             return;

@@ -1,0 +1,32 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="1AlmereTV.nl" tvg-logo="https://cdn.iptv-org.net/logo/1AlmereTV.nl.png" group-title="general",1AlmereTV (720p)
+https://d3472rjicrodic.cloudfront.net/nlpo/clr-nlpo/709d5260/index.m3u8
+#EXTINF:-1 tvg-id="1HDMusicTelevision.ru" tvg-logo="https://cdn.iptv-org.net/logo/1HDMusicTelevision.ru.png" group-title="music",1HD Music Television (1080p)
+http://176.118.197.101/1HD/index.m3u8
+#EXTINF:-1 tvg-id="1HDMusicTelevision.ru" tvg-logo="https://cdn.iptv-org.net/logo/1HDMusicTelevision.ru.png" group-title="music",1HD Music Television (1080p)
+https://stream8.cinerama.uz/1267/tracks-v1a1/mono.m3u8
+#EXTINF:-1 tvg-id="1KZNTV.za" tvg-logo="https://cdn.iptv-org.net/logo/1KZNTV.za.png" group-title="entertainment",1KZN TV (576p)
+https://cdn.freevisiontv.co.za/sttv/smil:1kzn.stream.smil/playlist.m3u8
+#EXTINF:-1 tvg-id="1Plus1International.ua" tvg-logo="https://cdn.iptv-org.net/logo/1Plus1International.ua.png" group-title="general",1+1 International (720p)
+https://dash2.antik.sk/live/test_one_plus_one_int_tizen/playlist.m3u8
+#EXTINF:-1 tvg-id="1Plus1Marafon.ua" tvg-logo="https://cdn.iptv-org.net/logo/1Plus1Marafon.ua.png" group-title="general",1+1 Marafon (1080p)
+https://dash2.antik.sk/live/1plus1_marathon/playlist.m3u8
+#EXTINF:-1 tvg-id="1Plus1Ukraina.ua" tvg-logo="https://cdn.iptv-org.net/logo/1Plus1Ukraina.ua.png" group-title="general",1+1 Ukraina (1080p)
+http://stream.mcquack.net/219/index.m3u8
+#EXTINF:-1 tvg-id="1TV.ge" tvg-logo="https://cdn.iptv-org.net/logo/1TV.ge.png" group-title="general",1TV (720p)
+https://tv.cdn.xsg.ge/gpb-1tv/index.m3u8
+#EXTINF:-1 tvg-id="1TV.ge" tvg-logo="https://cdn.iptv-org.net/logo/1TV.ge.png" group-title="general",1TV
+http://nue01-edge01.itdc.ge/gpb/mpegts
+#EXTINF:-1 tvg-id="1TwenteTV.nl" tvg-logo="https://cdn.iptv-org.net/logo/1TwenteTV.nl.png" group-title="general",1Twente TV (1080p)
+https://ms7.mx-cd.net/dtv-11/198-989148/1Twente_TV.smil/chunklist_w954512639_b4292608_slNLD.m3u8
+#EXTINF:-1 tvg-id="2GB.au" tvg-logo="https://cdn.iptv-org.net/logo/2GB.au.png" group-title="news",2GB (1080p)
+https://2gblive.akamaized.net/hls/live/2033805/2GB/index.m3u8
+#EXTINF:-1 tvg-id="2M.ma" tvg-logo="https://cdn.iptv-org.net/logo/2M.ma.png" group-title="general",2M
+http://185.9.2.18/chid_218/index.m3u8
+#EXTINF:-1 tvg-id="2MMonde.ma" tvg-logo="https://cdn.iptv-org.net/logo/2MMonde.ma.png" group-title="general",2M Monde (1080p)
+https://d2qh3gh0k5vp3v.cloudfront.net/v1/master/3722c60a815c199d9c0ef36c5b73da68a62b09d1/cc-n6pess5lwbghr/2M_ES.m3u8
+#EXTINF:-1 tvg-id="2Plus2.ua" tvg-logo="https://cdn.iptv-org.net/logo/2Plus2.ua.png" group-title="general",2+2 (1080p)
+http://stream.mcquack.net/173/index.m3u8
+#EXTINF:-1 tvg-id="2TV.ge" tvg-logo="https://cdn.iptv-org.net/logo/2TV.ge.png" group-title="general",2 TV (720p)
+https://tv.cdn.xsg.ge/gpb-2tv/index.m3u8
+#EXTINF:-1 tvg-id="2x2.ru" tvg-logo="https://cdn.iptv-org.net/logo/2x2.ru.png" group-title="entertainment",2x2 (576i)

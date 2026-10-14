@@ -146,6 +146,7 @@ ExecStart=$NODE_BIN $DIR/server.js
 Environment=PORT=${PORT:-8090}
 Environment=HOST=${HOST:-0.0.0.0}
 Environment=IPTV_LOG=1
+Environment=PUBLIC_URL=${PUBLIC_URL:-https://iptv-srv.tail045fd4.ts.net}
 Restart=always
 RestartSec=3
 

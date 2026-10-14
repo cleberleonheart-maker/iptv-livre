@@ -11,13 +11,20 @@
  *   node health.js --stats    -> so mostra o resumo do estado atual
  * ------------------------------------------------------------------ */
 
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { isSoft } from './streamstate.js';
+import {
+  extractHost,
+  loadHosts,
+  hostIsDead,
+  hostReason,
+  refreshHosts,
+} from './hosthealth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = process.env.IPTV_CACHE_DIR
@@ -38,26 +45,6 @@ const STALE_MS = 7 * 24 * 3600e3;
    reinicia o relogio de amadurecimento do servidor e deixa canal morto
    "aparecendo" sem sinal. */
 const RECHECK_DEAD_MS = 6 * 3600e3;
-
-/* Falhas que nao provam que o canal morreu: CDN bloqueando por anti-bot,
-   timeout de rede, porta fechada. Precisam de nova sonda antes de contar
-   como morto. "HTTP 404" e "ENOTFOUND" sao conclusivos e nao entram aqui. */
-const SOFT_WHY = new Set([
-  'HTTP 401',
-  'HTTP 403',
-  'HTTP 429',
-  'HTTP 500',
-  'HTTP 502',
-  'HTTP 503',
-  'HTTP 504',
-  'timeout',
-  'ECONNRESET',
-  'EPIPE',
-  'socket hang up',
-  'retornou HTML',
-]);
-
-const isSoft = (why) => SOFT_WHY.has(why);
 
 /* ---------------------------- estado ---------------------------- */
 
@@ -91,6 +78,7 @@ async function save() {
    "re-verificar agora"), grava o novo estado e devolve os resultados.
    onResult permite acompanhar o progresso de lote grande. */
 async function recheck(urls, { concurrency = CONCURRENCY, onResult = null } = {}) {
+  await loadHosts();
   const results = [];
   if (!urls.length) return results;
   let i = 0;
@@ -112,6 +100,7 @@ async function recheck(urls, { concurrency = CONCURRENCY, onResult = null } = {}
           ctype: r.ctype || null,
           viaRetry: !!r.viaRetry,
           audioOnly: r.audioOnly || null,
+          ms: r.ok ? r.ms || null : null,
           checked: Date.now(),
         };
         const rec = {
@@ -142,6 +131,10 @@ async function recheck(urls, { concurrency = CONCURRENCY, onResult = null } = {}
    Range e com os cabecalhos que um player de navegador mandaria. A segunda
    resposta e o veredito. */
 function probe(url, { timeout = TIMEOUT } = {}) {
+  // host ja conhecido como morto (NXDOMAIN): nem tenta HTTP
+  if (hostIsDead(url)) {
+    return Promise.resolve({ ok: false, why: hostReason(url) || 'ENOTFOUND', code: 0, hostDead: true });
+  }
   return attempt(url, { timeout, headers: headersFor(url, false) }).then(
     (first) => {
       if (first.ok || !isSoft(first.why)) return first;
@@ -272,6 +265,7 @@ async function drillSegment(base, head) {
 
 function attempt(url, { timeout = TIMEOUT, headers = {} } = {}) {
   return new Promise((resolve) => {
+    const t0 = Date.now();
     let u;
     try {
       u = new URL(url);
@@ -357,7 +351,11 @@ function attempt(url, { timeout = TIMEOUT, headers = {} } = {}) {
                 attrLines.every((line) => {
                   const attr = line.replace(/^#EXT-X-STREAM-INF:/i, '');
                   if (/RESOLUTION\s*=\s*\d+\s*x/i.test(attr)) return false;
-                  const codecs = (attr.match(/CODECS\s*=\s*"([^"]*)"/i) || [])[1] || '';
+                  const codecs = (attr.match(/CODECS\s*=\s*"([^"]*)"/i) || [])[1];
+                  // sem CODECS nao da pra afirmar que e so audio (varios
+                  // provedores MPEG-TS omitem o atributo); so marca audio-only
+                  // quando o CODECS foi declarado e nao tem video.
+                  if (codecs === undefined) return false;
                   return !/avc1|hvc1|hev1|dvav|vp9|vp8|av01|mp4v/i.test(codecs);
                 });
               drillSegment(url, head).then((segOk) => {
@@ -370,6 +368,7 @@ function attempt(url, { timeout = TIMEOUT, headers = {} } = {}) {
                     bytes: got,
                     kind: 'master',
                     audioOnly,
+                    ms: Date.now() - t0,
                   });
                 });
               return;
@@ -383,6 +382,7 @@ function attempt(url, { timeout = TIMEOUT, headers = {} } = {}) {
                 ctype,
                 bytes: got,
                 kind: 'media',
+                ms: Date.now() - t0,
               });
             });
           }
@@ -393,7 +393,7 @@ function attempt(url, { timeout = TIMEOUT, headers = {} } = {}) {
           }
           if (!buf.length) return resolve({ ok: false, why: 'corpo vazio', code });
 
-          return resolve({ ok: true, code, ctype, bytes: got });
+          return resolve({ ok: true, code, ctype, bytes: got, ms: Date.now() - t0 });
         }
       }
     );
@@ -422,11 +422,30 @@ async function streamUrls() {
   return [...new Set(streams.map((s) => s.url).filter(Boolean))];
 }
 
+/* Streams das listas M3U importadas pelo usuario (.cache/custom.json).
+   Sem isso a varredura so cobria o iptv-org e as fontes do usuario nunca
+   eram verificadas — um provedor morto ficava "aparecendo" para sempre. */
+async function customStreamUrls() {
+  try {
+    const raw = JSON.parse(await fsp.readFile(path.join(CACHE_DIR, 'custom.json'), 'utf8'));
+    const urls = [];
+    for (const src of raw.sources || []) {
+      if (src.active === false) continue;
+      for (const st of src.streams || []) if (st.url) urls.push(st.url);
+    }
+    return urls;
+  } catch {
+    return [];
+  }
+}
+
 /* ----------------------------- run ----------------------------- */
 
 async function run({ force = false, country = null } = {}) {
   await load();
-  const urls = await streamUrls();
+  await loadHosts();
+  const [iptvUrls, ownUrls] = await Promise.all([streamUrls(), customStreamUrls()]);
+  const urls = [...new Set([...iptvUrls, ...ownUrls])];
   if (!urls.length) {
     console.error('nenhuma URL obtida do catalogo');
     process.exit(1);
@@ -437,6 +456,9 @@ async function run({ force = false, country = null } = {}) {
     const e = state.entries[u];
     if (!e) return true;
     if (Date.now() - (e.checked || 0) > STALE_MS) return true;
+    // sonda viva mas sem latencia registrada: resonda uma vez para popular a
+    // ordenacao de "melhor link" do catalogo
+    if (e.ok && !e.ms) return true;
     if (!e.ok && !e.viaRetry) {
       // morto confirmado: espera o RECHECK_DEAD_MS antes de sondar de novo,
       // senao a revisao mantem o canal morto "aparecendo" sem sinal
@@ -445,6 +467,18 @@ async function run({ force = false, country = null } = {}) {
     }
     return false;
   });
+
+  // passada de DNS nos hosts das listas do usuario: marca provedores mortos
+  // (NXDOMAIN) de uma vez, sem gastar HTTP em cada stream. Hosts do iptv-org
+  // ficam de fora porque a varredura HTTP ja cobre eles.
+  const hosts = [...new Set(ownUrls.map(extractHost).filter(Boolean))];
+  const { cache: hcache } = await refreshHosts(hosts, {
+    concurrency: Number(process.env.HOST_CONCURRENCY || 16),
+  });
+  const deadHosts = hosts.filter((h) => hcache.hosts[h] && hcache.hosts[h].dead);
+  console.log(
+    `${hosts.length} hosts | ${deadHosts.length} mortos (DNS) | ${ownUrls.length} streams de listas proprias`
+  );
 
   console.log(
     `${urls.length} URLs no catalogo | ${todo.length} a checar | concurrency ${CONCURRENCY}${country ? ` | pais ${country}` : ''}`
@@ -461,7 +495,10 @@ async function run({ force = false, country = null } = {}) {
   const workers = Array.from({ length: CONCURRENCY }, async () => {
     while (queue.length) {
       const url = queue.shift();
-      const r = await probe(url);
+      const forceDead = hostReason(url);
+      const r = forceDead
+        ? { ok: false, why: forceDead, code: 0, hostDead: true }
+        : await probe(url);
       state.entries[url] = {
         ok: r.ok,
         why: r.why || null,
@@ -469,6 +506,8 @@ async function run({ force = false, country = null } = {}) {
         ctype: r.ctype || null,
         viaRetry: !!r.viaRetry,
         audioOnly: r.audioOnly || null,
+        hostDead: !!r.hostDead,
+        ms: r.ok ? r.ms || null : null,
         checked: Date.now(),
       };
       if (r.ok) {
@@ -497,7 +536,26 @@ async function run({ force = false, country = null } = {}) {
     `\npronto em ${Math.round((Date.now() - t0) / 1000)}s | checados ${done} | vivos ${alive} | mortos ${dead} | ja conhecidos ${skipped}`
   );
   if (revived) console.log(`${revived} voltaram a funcionar no retry (403 -> 200)`);
+  const pruned = prune(urls);
+  if (pruned) {
+    await save();
+    console.log(`${pruned} entradas antigas removidas (urls que nao existem mais)`);
+  }
   console.log(`estado salvo em ${HEALTH_FILE}`);
+}
+
+/* Remove do estado as URLs que nao existem mais em nenhuma lista (iptv-org nem
+   custom). Sem isso o health.json so cresce e a re-verificacao fica mais lenta. */
+function prune(validUrls) {
+  const keep = validUrls instanceof Set ? validUrls : new Set(validUrls || []);
+  let removed = 0;
+  for (const u of Object.keys(state.entries)) {
+    if (!keep.has(u)) {
+      delete state.entries[u];
+      removed++;
+    }
+  }
+  return removed;
 }
 
 function stats() {
@@ -536,4 +594,4 @@ function getHealth() {
   return state;
 }
 
-export { probe, load, save, recheck, HEALTH_FILE, getHealth };
+export { probe, load, save, recheck, prune, HEALTH_FILE, getHealth };

@@ -241,9 +241,10 @@ async function loadItems(reset = true) {
     state.hasMore = false;
   }
   const p = new URLSearchParams();
-  p.set('kind', state.kind);
-  if (state.country !== 'all') p.set('country', state.country);
-  if (state.category !== 'all') p.set('category', state.category);
+  const searching = !!state.query;
+  p.set('kind', searching ? 'all' : state.kind);
+  if (!searching && state.country !== 'all') p.set('country', state.country);
+  if (!searching && state.category !== 'all') p.set('category', state.category);
   if (state.query) p.set('q', state.query);
   p.set('limit', String(PAGE_SIZE));
   p.set('offset', String(state.offset));
@@ -258,6 +259,7 @@ async function loadItems(reset = true) {
 /* ---------------- render ---------------- */
 
 function visible() {
+  if (state.query) return state.items;
   if (state.tab === 'fav') return state.items.filter((i) => favs.has(i.id));
   if (state.tab === 'recent') {
     const byId = new Map(state.items.map((i) => [i.id, i]));
@@ -276,7 +278,7 @@ function render(reset) {
 
   const end = state.shown + state.page;
   for (let i = state.shown; i < Math.min(end, list.length); i++) {
-    grid.appendChild(cardFor(list[i]));
+    grid.appendChild(cardFor(list[i], i + 1));
   }
   state.shown = Math.min(end, list.length);
 
@@ -284,7 +286,7 @@ function render(reset) {
   $('#btnMore').parentElement.hidden = !(state.shown < list.length || state.hasMore);
 }
 
-function cardFor(ch) {
+function cardFor(ch, num) {
   const el = document.createElement('div');
   el.className = 'card' + (favs.has(ch.id) ? ' fav-on' : '') + (ch.kind === 'radio' ? ' is-radio' : '');
   el.tabIndex = 0;
@@ -324,6 +326,7 @@ function cardFor(ch) {
     `<span class="sig ${sig}" title="${
       sig === 'on' ? 'sinal verificado' : 'sinal não verificado'
     }"></span>` +
+    `<span class="chnum" title="Número para zapping">${num || ''}</span>` +
     logo +
     `<div class="name">${escapeHTML(ch.name)}</div>` +
     `<div class="sub">${ch.country || '—'}${qual ? ' · ' + escapeHTML(String(qual)) : ''}${
@@ -371,7 +374,21 @@ function escapeHTML(s) {
 
 /* ---------------- acoes ---------------- */
 
+let currentChannel = null;
+let prevChannel = null;
+let zapBuf = '';
+let zapTimer = null;
+const zapOverlay = document.getElementById('zapOverlay');
+
+function updatePrevBtn() {
+  const b = document.getElementById('btnPrev');
+  if (b) b.hidden = !prevChannel;
+}
+
 function play(ch, el = null) {
+  if (currentChannel && currentChannel.id !== ch.id) prevChannel = currentChannel;
+  currentChannel = ch;
+  updatePrevBtn();
   document.querySelectorAll('.card.playing').forEach((n) => n.classList.remove('playing'));
   if (el) el.classList.add('playing');
   pushHistory(ch.id);
@@ -387,10 +404,114 @@ function play(ch, el = null) {
         el.focus();
       }
     },
-    { startAt, onProgress: (p) => saveProgress(ch.id, p) }
+    { startAt, onProgress: (p) => saveProgress(ch.id, p), onEnded: () => playNextEpisode(ch) }
   );
   updateFavBtn();
 }
+
+/* ---------------- próximo episódio automático ---------------- */
+
+/* Extrai a serie e a temporada/episodio de um nome "SERIE S01E02 ..." ou
+   "SERIE 1x02". Sem esse padrao, devolve null (nao e serie/nao da pra encadear). */
+function parseSeriesName(name) {
+  const t = String(name || '').trim();
+  let m = t.match(/^(.*?)[\s._-]*[Ss](\d{1,2})[\s._-]*[Ee](\d{1,3})(?:[\s._-].*)?$/);
+  if (!m) m = t.match(/^(.*?)[\s._-]*(\d{1,2})x(\d{1,3})(?:[\s._-].*)?$/);
+  if (!m) return null;
+  const base = m[1].replace(/[-._\s]+$/, '').replace(/\s+/g, ' ').trim();
+  if (!base) return null;
+  const season = Number(m[2]);
+  const episode = Number(m[3]);
+  return { base, key: base.toLowerCase(), season, episode, order: season * 10000 + episode };
+}
+
+/* Episodios da mesma serie, em ordem. Usa o que ja esta carregado; se o
+   proximo nao estiver na lista (pagina/filtro), busca no catalogo. */
+async function seriesEpisodes(ch) {
+  const cur = parseSeriesName(ch.name);
+  if (!cur) return null;
+  const scan = (arr) =>
+    arr
+      .map((i) => ({ i, k: parseSeriesName(i.name) }))
+      .filter((x) => x.k && x.k.key === cur.key)
+      .sort((a, b) => a.k.order - b.k.order)
+      .map((x) => x.i);
+  const local = scan(state.items);
+  const idx = local.findIndex((x) => x.id === ch.id);
+  if (idx >= 0 && idx + 1 < local.length) return local;
+  try {
+    const d = await api(
+      '/api/catalog?kind=all&q=' + encodeURIComponent(cur.base) + '&limit=2000'
+    );
+    const all = scan(d.items || []);
+    if (all.length > local.length) return all;
+  } catch {}
+  return local.length ? local : null;
+}
+
+let nextOpening = false;
+async function playNextEpisode(ch) {
+  if (nextOpening) return;
+  nextOpening = true;
+  try {
+    const list = await seriesEpisodes(ch);
+    if (!list) return;
+    const i = list.findIndex((x) => x.id === ch.id);
+    if (i < 0 || i + 1 >= list.length) {
+      toast('fim dos episódios disponíveis');
+      return;
+    }
+    const next = list[i + 1];
+    toast('a seguir: ' + next.name);
+    play(next);
+  } finally {
+    nextOpening = false;
+  }
+}
+
+/* ---------------- zapping: numero do canal + canal anterior ---------------- */
+
+function showZap() {
+  if (!zapOverlay) return;
+  zapOverlay.innerHTML = '<span>canal</span><strong>' + escapeHTML(zapBuf) + '</strong>';
+  zapOverlay.hidden = false;
+}
+function hideZap() {
+  if (zapOverlay) zapOverlay.hidden = true;
+}
+
+function zapDigit(d) {
+  zapBuf += d;
+  if (zapBuf.length > 4) zapBuf = zapBuf.slice(-4);
+  showZap();
+  clearTimeout(zapTimer);
+  zapTimer = setTimeout(() => {
+    const n = parseInt(zapBuf, 10);
+    zapBuf = '';
+    hideZap();
+    if (n > 0) zapToNumber(n);
+  }, 1200);
+}
+
+function zapToNumber(n) {
+  const list = visible();
+  const ch = list[n - 1];
+  if (!ch) {
+    toast('canal ' + n + ' não existe');
+    return;
+  }
+  const el = grid.querySelector(`[data-id="${CSS.escape(ch.id)}"]`);
+  if (el) el.scrollIntoView({ block: 'nearest' });
+  play(ch, el);
+}
+
+function zapToPrev() {
+  if (!prevChannel) return;
+  toast('canal anterior');
+  play(prevChannel);
+}
+
+document.getElementById('btnPrev')?.addEventListener('click', zapToPrev);
 
 function toggleFav(id) {
   if (favs.has(id)) {
@@ -535,13 +656,89 @@ $('#btnMenu').onclick = () => $('#sidebar').classList.toggle('open');
 $('#btnBack').onclick = () => Player.close();
 $('#btnFav').onclick = () => Player.channel && toggleFav(Player.channel.id);
 
+/* Navegacao por controle nos botoes do topo (TV, Radio, Favoritos...).
+   ◀/▶ percorrem a fila, ▼ desce para a grade, ▲ volta. O foco nunca sai
+   da barra rolando a pagina inteira. */
+function allChips() {
+  return [...document.querySelectorAll('.chip')].filter((c) => c.offsetParent !== null);
+}
+function focusChips(dir) {
+  const chips = allChips();
+  if (!chips.length) return;
+  let i;
+  if (dir === 0) {
+    const act = chips.findIndex((c) => c.classList.contains('active'));
+    i = act >= 0 ? act : 0;
+  } else {
+    const cur = chips.indexOf(document.activeElement);
+    i = cur >= 0 ? cur + dir : dir > 0 ? -1 : 0;
+    i = (i + chips.length) % chips.length;
+  }
+  chips[i].focus();
+  try {
+    chips[i].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  } catch {}
+}
+
+/* Desliza a faixa de botoes do topo na horizontal (◀/▶). A pagina em si
+   nunca rola; so a barra se move dentro da sua area. */
+function slideQuick(dir) {
+  const q = document.querySelector('.quick');
+  if (!q) return;
+  const max = q.scrollWidth - q.clientWidth;
+  if (max <= 0) return;
+  const step = Math.min(150, max);
+  let to = q.scrollLeft + dir * step;
+  to = Math.min(Math.max(to, 0), max);
+  q.scrollTo({ left: to, behavior: 'smooth' });
+}
+
+/* Normaliza as teclas de direcao do controle remoto: alguns WebView de TV
+   entregam DPAD como keyCode 19-22 com e.key = 'Unidentified' (ou 'Up'/
+   'Down'/'Left'/'Right'), outros usam ArrowUp/Down/Left/Right padrao. */
+function arrowKey(e) {
+  const k = e.key;
+  const c = e.keyCode;
+  if (k === 'ArrowLeft' || k === 'Left' || c === 21 || c === 37) return 'left';
+  if (k === 'ArrowRight' || k === 'Right' || c === 22 || c === 39) return 'right';
+  if (k === 'ArrowUp' || k === 'Up' || c === 19 || c === 38) return 'up';
+  if (k === 'ArrowDown' || k === 'Down' || c === 20 || c === 40) return 'down';
+  return null;
+}
+
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Backspace' || e.key === 'BrowserBack') {
+  // zapping: digitar o numero do canal (funciona tambem com o player aberto)
+  if (
+    /^[0-9]$/.test(e.key) &&
+    dlg.hidden &&
+    panel.hidden &&
+    egGrid.hidden &&
+    shareDlg.hidden &&
+    m3uDlg.hidden &&
+    $('#parDlg').hidden
+  ) {
+    const t = e.target;
+    if (!(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable))) {
+      e.preventDefault();
+      zapDigit(e.key);
+      return;
+    }
+  }
+  if (e.key === 'Backspace' || e.key === 'BrowserBack' || e.keyCode === 4) {
     if (dlg.hidden && Player.isOpen) Player.close();
     return; // nunca sobrepoe a digitacao
   }
-  if (e.key === 'Escape') {
+  if (e.key === 'Escape' || e.keyCode === 27) {
     if (!dlg.hidden) return closeDlg(null);
+    if (!egGrid.hidden) return closeGrid();
+    if (!shareDlg.hidden) {
+      shareDlg.hidden = true;
+      return;
+    }
+    if (!m3uDlg.hidden) {
+      m3uDlg.hidden = true;
+      return;
+    }
     if (Player.isOpen) Player.close();
     else $('#sidebar').classList.remove('open');
     return;
@@ -549,32 +746,79 @@ document.addEventListener('keydown', (e) => {
   if (Player.isOpen) {
     if (e.key === 'f' || e.key === 'F') updateFavBtn();
     // setas L/R percorrem os botoes do topo do player no remoto
-    const btns = ['btnBack', 'btnQual', 'btnCC', 'btnCast', 'btnFs', 'btnSleep', 'btnFav']
+    const k = arrowKey(e);
+    const btns = ['btnBack', 'btnPrev', 'btnQual', 'btnCC', 'btnCast', 'btnFs', 'btnShare', 'btnSleep', 'btnFav']
       .map((id) => document.getElementById(id))
       .filter((b) => b && !b.hidden && b.offsetParent !== null);
-    if (btns.length && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-      let i = btns.indexOf(document.activeElement);
-      if (i >= 0) i = (i + (e.key === 'ArrowRight' ? 1 : -1) + btns.length) % btns.length;
-      else i = e.key === 'ArrowRight' ? 0 : btns.length - 1;
+    if (btns.length && (k === 'left' || k === 'right')) {
       e.preventDefault();
+      let i = btns.indexOf(document.activeElement);
+      if (i >= 0) i = (i + (k === 'right' ? 1 : -1) + btns.length) % btns.length;
+      else i = k === 'right' ? 0 : btns.length - 1;
       btns[i].focus();
     }
     return;
   }
-  // navegacao por setas quando o foco esta no grid
-  if (!Player.isOpen && document.activeElement?.classList.contains('card')) {
-    const cards = [...grid.children];
-    const i = cards.indexOf(document.activeElement);
-    let n = -1;
-    if (e.key === 'ArrowRight') n = i + 1;
-    if (e.key === 'ArrowLeft') n = i - 1;
-    if (e.key === 'ArrowDown') n = i + Math.floor(grid.clientWidth / 150) || i + 4;
-    if (e.key === 'ArrowUp') n = i - 4;
-    if (n >= 0 && n < cards.length) {
-      e.preventDefault();
-      cards[n].focus();
-    }
+  const k = arrowKey(e);
+  const ae = document.activeElement;
+  const onInput = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA');
+  if (!k) return;
+  if (dlg.hidden && onInput) return; // setas dentro da caixa de busca
+  e.preventDefault(); // nada de a pagina rolar/pular com o controle
+
+  // dialogo aberto: setas circulam pelos botoes do dialogo (OK/Cancel...)
+  if (!dlg.hidden) {
+    if (onInput) return;
+    const dd = [...dlg.querySelectorAll('button')].filter((b) => b.offsetParent !== null);
+    if (!dd.length) return;
+    const dir = k === 'left' || k === 'up' ? -1 : 1;
+    let n;
+    if (dd.indexOf(ae) < 0) n = dir > 0 ? 0 : dd.length - 1;
+    else n = (dd.indexOf(ae) + dir + dd.length) % dd.length;
+    dd[n].focus();
+    return;
   }
+
+  const onCard = ae?.classList?.contains('card');
+  const onChip = ae?.classList?.contains('chip');
+
+  if (onChip) {
+    // ◀/▶ deslizam a barra de botoes (o foco fica parado no botao ativo)
+    if (k === 'left') slideQuick(-1);
+    else if (k === 'right') slideQuick(1);
+    else if (k === 'down') {
+      const c = grid.querySelector('.card');
+      if (c) c.focus();
+    }
+    return;
+  }
+
+  if (onCard) {
+    const cards = [...grid.children];
+    const i = cards.indexOf(ae);
+    let n = -1;
+    if (k === 'right') n = i + 1;
+    if (k === 'left') n = i - 1;
+    if (k === 'down') n = i + Math.floor(grid.clientWidth / 150) || i + 4;
+    if (k === 'up') {
+      n = i - 4;
+      // voltou para a primeira linha: sobe de novo os botoes do topo
+      if (n < 0) {
+        focusChips(0);
+        return;
+      }
+    }
+    if (n >= 0 && n < cards.length) cards[n].focus();
+    return;
+  }
+
+  // foco fora da barra/grelha (corpo da pagina): setas deslizam o topo
+  if (k === 'left') slideQuick(-1);
+  else if (k === 'right') slideQuick(1);
+  else if (k === 'down') {
+    const c = grid.querySelector('.card');
+    if (c) c.focus();
+  } else focusChips(0);
 });
 
 /* ---------------- EPG ---------------- */
@@ -590,9 +834,18 @@ $('#btnEpg').onclick = async () => {
   }
   if (!sources.length) return toast('nenhum guia configurado');
 
+  // puxa o ultimo guia usado para o topo, pra escolha ficar mais rapida
+  const epgLast = localStorage.getItem('epg:last');
+  if (epgLast)
+    sources.sort((a, b) =>
+      a.url === epgLast ? -1 : b.url === epgLast ? 1 : 0
+    );
+
   const src = await openDlg({
     title: 'Guia EPG',
-    help: 'Escolha o país do guia de programação',
+    help:
+      'Escolha o país do guia de programação' +
+      (epgLast ? ` (último: ${sources[0].name})` : ''),
     choices: sources.map((s) => ({ label: s.name, value: s.url })),
   });
   if (!src) return;
@@ -604,8 +857,13 @@ $('#btnEpg').onclick = async () => {
     const d = await (
       await fetch('/api/epg/load?src=' + encodeURIComponent(src))
     ).json();
+    if (d.error) return toast('Falha ao carregar o guia: ' + d.error);
+    localStorage.setItem('epg:last', src);
+    const resumo = `${d.channels.toLocaleString('pt-BR')} canais, ${d.programmes.toLocaleString('pt-BR')} programas`;
     toast(
-      `Guia carregado: ${d.channels.toLocaleString('pt-BR')} canais, ${d.programmes.toLocaleString('pt-BR')} programas`
+      d.fellBack
+        ? `Fonte pedida fora do ar — usei uma alternativa: ${resumo}`
+        : `Guia carregado: ${resumo}`
     );
   } catch (err) {
     toast('Falha ao carregar o guia: ' + err.message);
@@ -710,7 +968,171 @@ $('#btnEpgSearch').onclick = async () => {
   }
 };
 
-/* ---------------- re-verificacao de saude sob demanda ---------------- */
+/* ---------------- grade de programacao (timeline) ---------------- */
+
+const egGrid = $('#epgGrid');
+const egBody = $('#egBody');
+let egFrom = 0;
+const EG_HOURS = 7;
+
+function egClock(ms) {
+  return new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function closeGrid() {
+  egGrid.hidden = true;
+}
+
+async function loadGrid() {
+  const from = egFrom;
+  const to = from + EG_HOURS * 3600e3;
+  const p = new URLSearchParams({ from: String(from), to: String(to), limit: '40' });
+  p.set('kind', state.kind === 'all' ? 'all' : state.kind);
+  if (state.country && state.country !== 'all') p.set('country', state.country);
+  if (state.category && state.category !== 'all') p.set('category', state.category);
+  if (state.query) p.set('q', state.query);
+  egBody.innerHTML = '<p class="eg-msg">carregando…</p>';
+  try {
+    const d = await api('/api/epg/timeline?' + p.toString());
+    if (!d.channels || !d.channels.length) {
+      egBody.innerHTML =
+        '<p class="eg-msg">Sem programação para este filtro. Carregue o Guia EPG primeiro.</p>';
+      return;
+    }
+    renderGrid(d);
+  } catch (err) {
+    egBody.innerHTML = '<p class="eg-msg">falha: ' + escapeHTML(err.message) + '</p>';
+  }
+}
+
+function renderGrid(d) {
+  const { start, end } = d.window;
+  const span = end - start;
+  const now = Date.now();
+
+  let ticks = '';
+  const first = Math.ceil(start / 1800e3) * 1800e3;
+  for (let t = first; t < end; t += 1800e3) {
+    const left = ((t - start) / span) * 100;
+    ticks += `<span class="eg-tick" style="left:${left.toFixed(3)}%">${egClock(t)}</span>`;
+  }
+
+  let rows = '';
+  for (const ch of d.channels) {
+    let blocks = '';
+    for (const pr of ch.programmes) {
+      const s = Date.parse(pr.start);
+      const e = Date.parse(pr.stop);
+      const left = Math.max(0, ((s - start) / span) * 100);
+      const right = Math.min(100, ((e - start) / span) * 100);
+      const w = Math.max(0.4, right - left);
+      const isNow = s <= now && e > now;
+      blocks +=
+        `<button class="eg-prog${isNow ? ' now' : ''}" style="left:${left.toFixed(3)}%;width:${w.toFixed(3)}%"` +
+        ` data-id="${escapeHTML(ch.id)}" title="${escapeHTML(pr.title)}">` +
+        `<b>${escapeHTML(egClock(s))}</b> ${escapeHTML(pr.title)}</button>`;
+    }
+    rows +=
+      `<div class="eg-row"><div class="eg-chan" title="${escapeHTML(ch.name)}">${escapeHTML(
+        ch.name
+      )}</div><div class="eg-track">${blocks}</div></div>`;
+  }
+
+  const nowLeft = now >= start && now <= end ? ((now - start) / span) * 100 : -1;
+  egBody.innerHTML =
+    `<div class="eg-ruler"><div class="eg-chan"></div><div class="eg-scale">${ticks}</div></div>` +
+    `<div class="eg-rows">${rows}</div>` +
+    (nowLeft >= 0 ? `<div class="eg-now" style="left:calc(var(--egchan) + ${nowLeft.toFixed(3)}%)"></div>` : '');
+
+  egBody.querySelectorAll('.eg-prog').forEach((b) => {
+    b.onclick = () => {
+      const id = b.dataset.id;
+      closeGrid();
+      channelById(id).then((ch) => {
+        if (ch) play(ch);
+        else toast('canal indisponível na lista atual');
+      });
+    };
+  });
+}
+
+$('#btnGrid').onclick = () => {
+  egFrom = Date.now() - 1800e3;
+  egGrid.hidden = false;
+  loadGrid();
+};
+$('#egClose').onclick = closeGrid;
+$('#egPrev').onclick = () => {
+  egFrom -= 3 * 3600e3;
+  loadGrid();
+};
+$('#egNext').onclick = () => {
+  egFrom += 3 * 3600e3;
+  loadGrid();
+};
+$('#egNow').onclick = () => {
+  egFrom = Date.now() - 1800e3;
+  loadGrid();
+};
+egGrid.addEventListener('click', (e) => {
+  if (e.target === egGrid) closeGrid();
+});
+
+/* ---------------- compartilhar canal (link + QR) ---------------- */
+
+const shareDlg = $('#shareDlg');
+
+function shareCurrentChannel() {
+  const ch = Player.channel;
+  if (!ch) return;
+  const url = location.origin + '/?c=' + encodeURIComponent(ch.id);
+  $('#shareName').textContent = ch.name;
+  $('#shareUrl').value = url;
+  const qr = $('#shareQr');
+  qr.hidden = true;
+  qr.onload = () => {
+    qr.hidden = false;
+  };
+  qr.onerror = () => {
+    qr.hidden = true;
+  };
+  qr.src =
+    'https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' +
+    encodeURIComponent(url);
+  shareDlg.hidden = false;
+}
+
+$('#btnShare').onclick = shareCurrentChannel;
+$('#shareClose').onclick = () => {
+  shareDlg.hidden = true;
+};
+$('#shareCopy').onclick = () => copyText($('#shareUrl').value);
+shareDlg.addEventListener('click', (e) => {
+  if (e.target === shareDlg) shareDlg.hidden = true;
+});
+
+function downloadCsv(name, rows) {
+  const esc = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const csv = rows.map((r) => r.map(esc).join(';')).join('\r\n');
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 0);
+}
+
+function downloadDeadCsv(dead, name) {
+  downloadCsv(name, [
+    ['Canal', 'URL', 'Motivo', 'HTTP'].concat(
+      dead.map((d) => [d.name || '', d.url || '', d.why || '', d.code ?? ''])
+    ),
+  ]);
+}
 
 $('#btnRecheck').onclick = async () => {
   const btn = $('#btnRecheck');
@@ -731,14 +1153,20 @@ $('#btnRecheck').onclick = async () => {
         const dead = rep.dead || [];
         await loadItems(true);
         if (!dead.length) toast('Tudo certo: nenhum canal morto encontrado');
-        else
-          await openDlg({
+        else {
+          const r = await openDlg({
             title: `Re-verificação: ${dead.length} morto(s) escondido(s)`,
-            help: dead.slice(0, 25).map((d, i) => `${i + 1}. ${d.name || d.url} (${d.why})`).join('  |  ') +
+            help:
+              dead.slice(0, 25).map((d, i) => `${i + 1}. ${d.name || d.url} (${d.why})`).join('  |  ') +
               (dead.length > 25 ? `  … e mais ${dead.length - 25}.` : ''),
-            okLabel: 'Fechar',
-            choices: [{ label: 'Fechar', value: 'ok' }],
+            choices: [
+              { label: 'Fechar', value: 'ok' },
+              { label: '📄 Exportar CSV', value: 'csv' },
+            ],
           });
+          if (r === 'csv')
+            downloadDeadCsv(dead, `canais-mortos-${new Date().toISOString().slice(0, 10)}.csv`);
+        }
         return;
       }
     }
@@ -769,24 +1197,118 @@ function fmtUptime(sec) {
   return `${m}min`;
 }
 
+function fmtAgo(ts) {
+  if (!ts) return '—';
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return 'agora mesmo';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `há ${m}min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `há ${h}h`;
+  return `há ${Math.floor(h / 24)}d`;
+}
+
+async function refreshFlow() {
+  try {
+    const r = await fetch('/api/refresh', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 409) return toast('já está atualizando…');
+    if (!r.ok) throw new Error(d.error || 'HTTP ' + r.status);
+    toast('atualizando catálogo e guia…');
+    for (let i = 0; i < 150; i++) {
+      await new Promise((s) => setTimeout(s, 3000));
+      const s2 = await (await fetch('/api/refresh')).json().catch(() => ({}));
+      if (!s2.running) {
+        toast(s2.error ? 'falha: ' + s2.error : 'catálogo e guia atualizados');
+        await loadItems(true);
+        if (!panel.hidden) openPanel();
+        return;
+      }
+    }
+    toast('ainda atualizando em segundo plano');
+  } catch (err) {
+    toast('falha: ' + err.message);
+  }
+}
+
 async function openPanel() {
   panel.hidden = false;
   panelBody.innerHTML = '<p class="muted" style="padding:20px">carregando…</p>';
   let acct = {};
   let par = { configured: false, unlocked: true, blocked: [], categories: [] };
+  let srcs = { sources: [] };
+  let hov = null;
+  let dvr = { enabled: false, recordings: [] };
   try {
-    [acct, par] = await Promise.all([api('/api/account'), api('/api/parental')]);
+    [acct, par, srcs, hov, dvr] = await Promise.all([
+      api('/api/account'),
+      api('/api/parental'),
+      api('/api/sources'),
+      api('/api/health/overview').catch(() => null),
+      api('/api/dvr').catch(() => dvr),
+    ]);
   } catch {
     panelBody.innerHTML = '<p class="muted" style="padding:20px">falha ao carregar</p>';
     return;
   }
   const h = acct.health || {};
+  const hs = (hov && hov.streams) || {};
+  const hh = (hov && hov.hosts) || {};
+  const deadHosts = (hov && hov.deadHosts) || [];
+  const healthCards = [
+    ['Canais vivos', hs.alive ?? '—'],
+    ['Canais mortos', hs.dead ?? '—'],
+    ['Instáveis', hs.soft ?? '—'],
+    ['Hosts vivos', hh.total ? `${hh.alive ?? 0} / ${hh.total}` : '—'],
+  ];
+  const deadHostRows = deadHosts
+    .slice(0, 6)
+    .map(
+      (d) =>
+        `<div class="src-row"><span class="src-dead">⚠ ${escapeHTML(d.host)}</span><span class="muted">${d.channels} canal(is)</span></div>`
+    )
+    .join('');
+  const recLabel = { recording: 'gravando…', pending: 'agendada', done: 'pronta', error: 'falhou', canceled: 'cancelada' };
+  const recRows = (dvr.recordings || [])
+    .map((r) => {
+      const done = r.status === 'done';
+      const note = r.transcoding
+        ? ' · convertendo para H.264…'
+        : r.needsTranscode
+          ? ' · ⚠ HEVC, pode não tocar no navegador'
+          : '';
+      return `<div class="src-row">
+        <span class="${done ? '' : 'src-dead'}">${done ? '⏺' : '•'} ${escapeHTML(r.name || 'gravação')}</span>
+        <span class="muted">${escapeHTML(recLabel[r.status] || r.status)}${
+        r.size > 0 ? ' · ' + Math.max(1, Math.round(r.size / 1048576)) + ' MB' : ''
+      }${note}</span>
+        ${done && r.url ? `<button class="ghost tiny" data-rec-play="${escapeHTML(r.url)}">Assistir</button>` : ''}
+        ${done && r.url ? `<a class="ghost tiny" href="${escapeHTML(r.url)}" download>Baixar</a>` : ''}
+        ${
+          done && r.needsTranscode && !r.transcoding
+            ? `<button class="ghost tiny" data-rec-transcode="${r.id}">Converter para H.264</button>`
+            : ''
+        }
+        ${
+          r.status === 'recording'
+            ? `<button class="ghost tiny danger" data-rec-cancel="${r.id}">Parar</button>`
+            : `<button class="ghost tiny danger" data-rec-rm="${r.id}">Remover</button>`
+        }
+      </div>`;
+    })
+    .join('');
   const rows = [
     ['Usuário', acct.user || '—'],
     ['Sessões ativas', acct.sessions ?? '—'],
     ['Favoritos', acct.favs ?? '—'],
     ['No histórico', acct.history ?? '—'],
     ['Canais vivos', h.enabled ? `${h.alive ?? 0} / ${h.checked ?? 0}` : 'desligado'],
+    ['Catálogo', fmtAgo(acct.refresh ? acct.refresh.catalogAt : 0)],
+    [
+      'Guia EPG',
+      fmtAgo(acct.refresh ? acct.refresh.lastEpg : 0) +
+        (acct.refresh && acct.refresh.epgError ? ' ⚠ fonte fora do ar' : ''),
+    ],
     ['Uptime', fmtUptime(acct.uptime)],
   ];
   panelBody.innerHTML = `
@@ -800,13 +1322,26 @@ async function openPanel() {
     </div>
     <div class="panel-actions">
       <button id="paPass" class="ghost">Mudar senha</button>
-      <button id="paAdd" class="ghost">Adicionar usuário</button>
-      <button id="paDel" class="ghost">Remover usuário</button>
+      <button id="paRefresh" class="ghost">Atualizar catálogo e guia</button>
+      ${
+        acct.admin
+          ? '<button id="paAdd" class="ghost">Adicionar usuário</button>' +
+            '<button id="paDel" class="ghost">Remover usuário</button>'
+          : ''
+      }
       <button id="paClearHist" class="ghost">Limpar histórico</button>
       <button id="paExport" class="ghost">Exportar M3U</button>
+      ${
+        acct.admin
+          ? '<button id="paBackup" class="ghost">Backup</button>' +
+            '<button id="paRestore" class="ghost">Restaurar</button>'
+          : ''
+      }
       <button id="paLogoutAll" class="ghost danger">Sair de todos os aparelhos</button>
     </div>
-    <h4>Usuários</h4>
+    ${
+      acct.admin
+        ? `<h4>Usuários</h4>
     <div class="panel-users">
       ${(acct.users || [])
         .map(
@@ -814,7 +1349,71 @@ async function openPanel() {
             `<span class="pill${u.user === acct.user ? ' me' : ''}">${escapeHTML(u.user)}</span>`
         )
         .join('')}
+    </div>`
+        : ''
+    }
+    ${
+      hov
+        ? `<h4>Saúde dos canais</h4>
+    <div class="panel-grid">
+      ${healthCards
+        .map(
+          ([k, v]) =>
+            `<div class="panel-card"><span>${k}</span><strong>${escapeHTML(String(v))}</strong></div>`
+        )
+        .join('')}
     </div>
+    ${deadHostRows ? `<div class="panel-sources">${deadHostRows}</div>` : ''}
+    <div class="panel-actions">
+      <button id="paRecheck" class="ghost">Re-verificar canais agora</button>
+      <button id="paSweep" class="ghost">Rever hosts agora</button>
+    </div>`
+        : ''
+    }
+    <h4>Gravações${dvr.enabled ? '' : ' (desligadas)'}${
+      dvr.enabled && dvr.maxGB
+        ? ` <span class="muted">· ${Math.round((dvr.used || 0) / 1048576)} MB de ${dvr.maxGB} GB</span>`
+        : ''
+    }</h4>
+    <div class="panel-sources">
+      ${recRows || '<div class="panel-note">nenhuma gravação — use o botão ⏺ no player</div>'}
+    </div>
+    ${
+      acct.admin
+        ? `<h4>Listas (fontes)</h4>
+    <div class="panel-sources">
+      ${
+        (srcs.sources || []).length
+          ? (srcs.sources || [])
+              .map(
+                (s) =>
+                  `<div class="src-row">
+        <label class="chk"><input type="checkbox" data-act="${s.id}"${
+                    s.active ? ' checked' : ''
+                  }> <span>${escapeHTML(s.name)}</span></label>
+        <span class="muted">${s.count} canais</span>
+        ${
+          s.dead
+            ? '<span class="src-dead" title="Todos os canais desta lista estão em um host fora do ar">⚠ sem sinal</span>'
+            : s.ratio >= 0.3
+            ? `<span class="src-dead" title="${s.deadChannels} de ${s.count} canais em host fora do ar">⚠ ${Math.round(
+                s.ratio * 100
+              )}% fora do ar</span>`
+            : ''
+        }
+        <button class="ghost tiny" data-ren="${s.id}">Renomear</button>
+        <button class="ghost tiny danger" data-rm="${s.id}">Remover</button>
+      </div>`
+              )
+              .join('')
+          : '<div class="panel-note">nenhuma lista adicionada — use "Adicionar lista"</div>'
+      }
+    </div>
+    <div class="panel-actions">
+      <button id="paAddSrc" class="ghost">Adicionar lista (M3U)</button>
+    </div>`
+        : ''
+    }
     <h4>Controle parental</h4>
     <div class="panel-note">${
       par.configured
@@ -842,8 +1441,118 @@ async function openPanel() {
     </div>`;
 
   $('#paPass').onclick = changePasswordFlow;
-  $('#paAdd').onclick = addUserFlow;
-  $('#paDel').onclick = removeUserFlow;
+  $('#paRefresh').onclick = refreshFlow;
+  if ($('#paRecheck'))
+    $('#paRecheck').onclick = async () => {
+      try {
+        await fetch('/api/health/recheck', { method: 'POST' });
+        toast('re-verificação iniciada em segundo plano');
+      } catch {
+        toast('falha ao iniciar');
+      }
+    };
+  if ($('#paSweep'))
+    $('#paSweep').onclick = async () => {
+      try {
+        await fetch('/api/health/hosts', { method: 'POST' });
+        toast('revisando hosts das listas…');
+      } catch {
+        toast('falha ao iniciar');
+      }
+    };
+  panelBody.querySelectorAll('[data-rec-play]').forEach((b) => {
+    b.onclick = () => {
+      const url = b.dataset.recPlay;
+      panel.hidden = true;
+      play({
+        id: 'rec:' + url,
+        name: 'Gravação',
+        kind: 'movie',
+        categories: ['Gravações'],
+        streams: [{ url, quality: 'gravação' }],
+      });
+    };
+  });
+  panelBody.querySelectorAll('[data-rec-cancel]').forEach((b) => {
+    b.onclick = async () => {
+      await fetch('/api/dvr/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: b.dataset.recCancel }),
+      });
+      toast('gravação interrompida');
+      openPanel();
+    };
+  });
+  panelBody.querySelectorAll('[data-rec-rm]').forEach((b) => {
+    b.onclick = async () => {
+      await fetch('/api/dvr/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: b.dataset.recRm, purge: true }),
+      });
+      openPanel();
+    };
+  });
+  panelBody.querySelectorAll('[data-rec-transcode]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const r = await fetch('/api/dvr/transcode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: b.dataset.recTranscode }),
+        });
+        const d = await r.json().catch(() => ({}));
+        toast(r.ok ? 'convertendo para H.264 em segundo plano…' : d.error || 'falha ao converter');
+      } catch {
+        toast('falha ao converter');
+      }
+      openPanel();
+    };
+  });
+  if ($('#paAdd')) $('#paAdd').onclick = addUserFlow;
+  if ($('#paDel')) $('#paDel').onclick = removeUserFlow;
+  if ($('#paAddSrc')) $('#paAddSrc').onclick = importFlow;
+  panelBody.querySelectorAll('[data-act]').forEach((c) => {
+    c.onchange = async () => {
+      await fetch('/api/sources/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: c.dataset.act, active: c.checked }),
+      });
+      await reload();
+      openPanel();
+    };
+  });
+  panelBody.querySelectorAll('[data-ren]').forEach((b) => {
+    b.onclick = async () => {
+      const name = await openDlg({
+        title: 'Renomear lista',
+        placeholder: 'nome da lista',
+        okLabel: 'OK',
+      });
+      if (!name) return;
+      await fetch('/api/sources/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: b.dataset.ren, name }),
+      });
+      openPanel();
+    };
+  });
+  panelBody.querySelectorAll('[data-rm]').forEach((b) => {
+    b.onclick = async () => {
+      await fetch('/api/sources/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: b.dataset.rm }),
+      });
+      toast('lista removida');
+      await reload();
+      openPanel();
+    };
+  });
   $('#paClearHist').onclick = async () => {
     await fetch('/api/history', { method: 'DELETE' });
     recents = [];
@@ -853,6 +1562,8 @@ async function openPanel() {
     openPanel();
   };
   $('#paExport').onclick = exportFlow;
+  if ($('#paBackup')) $('#paBackup').onclick = backupFlow;
+  if ($('#paRestore')) $('#paRestore').onclick = restoreFlow;
   $('#paParSet').onclick = () => parentalSetFlow(par);
   if ($('#paParLock'))
     $('#paParLock').onclick = async () => {
@@ -945,15 +1656,103 @@ async function removeUserFlow() {
   }
 }
 
+const m3uDlg = $('#m3uDlg');
+
 async function exportFlow() {
-  const exportUrl = location.origin + '/api/m3u?kind=all';
-  const v = await openDlg({
-    title: 'Exportar M3U',
-    help: 'Use esta URL no VLC, Kodi ou TiviMate de outro aparelho:\n' + exportUrl,
-    value: exportUrl,
-    okLabel: 'Copiar',
-  });
-  if (v) copyText(v);
+  try {
+    const r = await fetch('/api/m3u-token');
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.token) throw new Error(d.error || 'HTTP ' + r.status);
+    const url =
+      d.url || location.origin + '/api/m3u?kind=all&token=' + encodeURIComponent(d.token);
+    $('#m3uUrl').value = url;
+    let lhost = '';
+    try {
+      lhost = new URL(url).hostname;
+    } catch {}
+    const local =
+      lhost === 'localhost' || lhost === '127.0.0.1' || lhost === '::1' || /^100\.115\./.test(lhost);
+    $('#m3uHelp').textContent = local
+      ? 'Atenção: você abriu em "' + location.host + '". A TV não alcança esse endereço — abra pelo IP da rede (ex.: http://192.168.x.x:8090) e gere o link de novo.'
+      : 'Escaneie o QR ou copie o link e cole no player da TV (IBO Player, TiviMate, VLC…).';
+    const qr = $('#m3uQr');
+    qr.hidden = true;
+    qr.onload = () => {
+      qr.hidden = false;
+    };
+    qr.onerror = () => {
+      qr.hidden = true;
+    };
+    qr.src =
+      'https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=' +
+      encodeURIComponent(url);
+    m3uDlg.hidden = false;
+  } catch (err) {
+    toast('falha: ' + err.message);
+  }
+}
+
+$('#m3uClose').onclick = () => {
+  m3uDlg.hidden = true;
+};
+$('#m3uCopy').onclick = () => copyText($('#m3uUrl').value);
+m3uDlg.addEventListener('click', (e) => {
+  if (e.target === m3uDlg) m3uDlg.hidden = true;
+});
+
+async function backupFlow() {
+  try {
+    const r = await fetch('/api/backup');
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.error || 'HTTP ' + r.status);
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'iptv-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    toast('backup baixado');
+  } catch (err) {
+    toast('falha: ' + err.message);
+  }
+}
+
+function restoreFlow() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.json,application/json';
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+    const ok = await openDlg({
+      title: 'Restaurar backup',
+      help: 'Substitui contas, favoritos, histórico, controle parental e listas pela configuração do arquivo. Continuar?',
+      value: f.name,
+      okLabel: 'Restaurar',
+    });
+    if (!ok) return;
+    try {
+      const text = await f.text();
+      const r = await fetch('/api/backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: text,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'HTTP ' + r.status);
+      toast(`backup restaurado (${d.users} usuários, ${d.sources} listas)`);
+      await reload();
+      openPanel();
+    } catch (err) {
+      toast('falha: ' + err.message);
+    }
+  };
+  inp.click();
 }
 
 /* ---------------- controle parental ---------------- */
@@ -1105,6 +1904,22 @@ if (SLEEP_OPTS.includes(savedSleep) && savedSleep > 0) {
   }, savedSleep * 60e3);
 }
 
+/* ---------------- relogio ---------------- */
+
+const clockEl = document.getElementById('clock');
+const plClockEl = document.getElementById('plClock');
+function tickClock() {
+  const now = new Date();
+  if (clockEl)
+    clockEl.textContent = now.toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  if (plClockEl) plClockEl.textContent = now.toLocaleTimeString('pt-BR');
+}
+tickClock();
+setInterval(tickClock, 1000);
+
 /* ---------------- dialogo inline ---------------- */
 
 const dlg = $('#dlg');
@@ -1184,11 +1999,11 @@ function legacyCopy(text, done) {
   document.body.removeChild(ta);
 }
 
-$('#btnImport').onclick = async () => {
+async function importFlow() {
   const url2 = await openDlg({
-    title: 'Importar M3U',
-    help: 'Cole a URL HTTP de uma lista .m3u/.m3u8. Ela e adicionada junto ao catalogo.',
-    okLabel: 'Importar',
+    title: 'Adicionar lista (M3U)',
+    help: 'Cole a URL HTTP de uma lista .m3u/.m3u8. Ela vira uma fonte que voce pode ativar ou desativar.',
+    okLabel: 'Adicionar',
     placeholder: 'http://.../playlist.m3u',
   });
   if (!url2) return;
@@ -1197,18 +2012,25 @@ $('#btnImport').onclick = async () => {
   btn.disabled = true;
   btn.textContent = 'Importando…';
   try {
-    const r = await fetch('/api/import?url=' + encodeURIComponent(url2));
+    const r = await fetch('/api/sources', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url2 }),
+    });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'HTTP ' + r.status);
-    toast(`importadas ${d.count} entrada(s) com sucesso`);
+    toast(`lista "${d.name}" adicionada (${d.count} canais)`);
     await reload();
+    if (!panel.hidden) openPanel();
   } catch (err) {
     toast('falha ao importar: ' + err.message);
   } finally {
     btn.disabled = false;
     btn.textContent = was;
   }
-};
+}
+
+$('#btnImport').onclick = importFlow;
 
 $('#btnExport').onclick = exportFlow;
 
@@ -1223,6 +2045,18 @@ window.__onAndroidBack = function () {
   }
   if (Player.isOpen) {
     Player.close();
+    return true;
+  }
+  if (!egGrid.hidden) {
+    closeGrid();
+    return true;
+  }
+  if (!shareDlg.hidden) {
+    shareDlg.hidden = true;
+    return true;
+  }
+  if (!m3uDlg.hidden) {
+    m3uDlg.hidden = true;
     return true;
   }
   if (!panel.hidden) {
@@ -1257,6 +2091,19 @@ if ('serviceWorker' in navigator) {
     await Promise.all([loadServerFavs(), loadServerHistory()]);
     await loadMeta();
     await loadItems();
+    // link compartilhado (?c=id): sintoniza o canal direto
+    const wanted = new URLSearchParams(location.search).get('c');
+    if (wanted) {
+      const ch = await channelById(wanted);
+      if (ch) {
+        play(ch);
+        history.replaceState(null, '', location.pathname);
+      } else {
+        toast('canal do link não encontrado');
+      }
+    }
+    // o controle comeca na barra de botoes do topo, sem fazer a grade pular
+    focusChips(0);
   } catch (err) {
     grid.innerHTML =
       '<p style="color:#8b98b0;text-align:center;padding:40px">Falha ao carregar o catálogo: ' +

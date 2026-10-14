@@ -17,6 +17,13 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
   let db = load();
   let lastMtime = mtime();
 
+  /* Migracao: arquivos criados antes de existir "admin" nao tem o flag.
+     O primeiro usuario vira o administrador, e isso e persistido. */
+  if (db && db.users.length && !db.users.some((u) => u.admin)) {
+    db.users[0].admin = true;
+    save();
+  }
+
   function mtime() {
     try {
       return fs.statSync(file).mtimeMs;
@@ -48,7 +55,7 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
     const pass = process.env.IPTV_PASS || crypto.randomBytes(4).toString('hex');
     const user = process.env.IPTV_USER || 'admin';
     db = {
-      users: [{ user, ...hash(pass) }],
+      users: [{ user, admin: true, ...hash(pass) }],
       createdAt: Date.now(),
     };
     save();
@@ -74,6 +81,12 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
   }
 
   const sessions = new Map();
+
+  function isAdmin(user) {
+    reloadIfChanged();
+    const rec = db.users.find((u) => u.user === user);
+    return !!(rec && rec.admin);
+  }
 
   async function verify(user, password) {
     reloadIfChanged();
@@ -188,7 +201,7 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
     file,
     enabled: db.users.length > 0,
     cookieName: COOKIE,
-    users: () => db.users.map((u) => ({ user: u.user })),
+    users: () => db.users.map((u) => ({ user: u.user, admin: !!u.admin })),
 
     verify,
     async addUser(user, password) {
@@ -201,11 +214,13 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
 
     removeUser(user) {
       reloadIfChanged();
-      const before = db.users.length;
+      const target = db.users.find((u) => u.user === user);
+      // nunca permite derrubar um administrador (evita "roubo" do admin)
+      if (!target || target.admin) return false;
       db.users = db.users.filter((u) => u.user !== user);
       save();
-      if (before !== db.users.length) dropUserSessions(user);
-      return before !== db.users.length;
+      dropUserSessions(user);
+      return true;
     },
 
     async changePassword(user, next) {
@@ -252,6 +267,8 @@ export function createAuth(cacheDir, { onFirstRun } = {}) {
       dropUserSessions(user);
       res.setHeader('Set-Cookie', clearCookieHeader());
     },
+
+    isAdmin,
 
     stop() {},
   };
