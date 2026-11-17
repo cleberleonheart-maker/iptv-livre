@@ -214,6 +214,10 @@ gravação fica marcada com ⚠ no painel e ganha dois botões:
 
 ## APK (Android TV / Fire TV / TV Box)
 
+Download do APK assinado (release): [iptv-livre.apk](https://github.com/cleberleonheart-maker/iptv-livre/releases/latest) — ou direto do servidor: `http://SEU_IP:8090/iptv-livre.apk`.
+
+Para compilar do zero:
+
 ```bash
 export IPTV_KS_PASS='sua-senha-da-keystore'   # tambem aceita IPTV_KEY_PASS
 cd ~/iptv/android && ./build.sh
